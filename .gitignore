@@ -3,3 +3,11 @@
 data/
 __pycache__/
 .pytest_cache/
+node_modules/
+.next/
+*.pdf
+.playwright/
+playwright-report/
+test-results/
+*.pyc
+.DS_Store
