@@ -1,304 +1,362 @@
-# Spec: Document OCR, Conversion & Translation Platform
+# Archive Workbench
 
-Status: Draft v0.1
-Owner: praveenmaths89@gmail.com
+Version 1.0
+Author: Praveen D Chougale
+Contact: praveenmaths89@gmail.com
+Licence: Apache-2.0
+Status: specification for the first open-source release
 
-## 1. Purpose
+Archive Workbench is an open-source research workbench for archaeology and history. A researcher uploads historical documents — handwriting, old print, colonial Indian archives such as British Library records on Kittur and Dharwar — and works from the page image, the transcription, and the sources that sit around them.
 
-A web application and API that lets a user upload one or many documents (scans, photos, PDFs), extracts the text with OCR, optionally translates it into any language, and exports the result as a Word (`.docx`) or PDF file. The user can bring their own model API key. The system automatically selects the most suitable model for each document based on its complexity, so simple documents are cheap and fast and hard ones get a stronger model.
+The prototype (v0.2) was a FastAPI app that sent page images to Claude, stored jobs in SQLite, and served a single HTML page. This document keeps the behaviour from that prototype that is still right, and replaces the parts that do not fit a local-first workbench.
 
-### Goals
-- Single and batch upload with per-file progress and results.
-- High-fidelity OCR, including layout (headings, columns, tables) and, where supported, handwriting and historical print.
-- Translation to any target language, with an option to keep the original alongside it.
-- Export to DOCX and PDF that preserves structure as far as possible.
-- Bring-your-own API key (BYOK) for supported model providers.
-- Automatic, explainable model routing by document complexity, with manual override.
+It runs on one machine first. Cloud deployment is a later step, described under the v2 roadmap.
 
-### Non-goals (v1)
-- Real-time or camera streaming OCR.
-- Editing documents in the browser beyond correcting extracted text.
-- Training or fine-tuning custom models.
-- Native mobile apps (the web UI must work on mobile browsers).
+## 1. What a researcher can do
 
-### Decisions (resolved)
-- **Deployment:** self-hosted / internal, single team. One shared provider key set, set via server config or the Settings page (see section 7); no per-user vault.
-- **Primary content:** historical documents and manuscripts (handwriting, degraded scans, old typefaces). Accuracy on these is the top priority and drives routing defaults and the benchmark.
-- **Model provider (v1):** Anthropic (Claude) for OCR, translation and research synthesis, because degraded historical material needs strong vision and reading comprehension. A local engine (Tesseract/PaddleOCR) is kept only as the no-key baseline for clean pages. Other providers are post-v1 via the adapter interface.
-- **PDF output:** searchable PDF with the original page images and an invisible text layer is the default and primary format (archival use). A reflowed text PDF remains available as an option.
-- **Launch languages:** English and major European languages (French, German, Spanish, Italian, Latin), including historical orthography. RTL, Indic and CJK support is post-v1 (fonts and layout still designed not to preclude it).
-- **Cost:** no per-page ceiling; accuracy first. The per-job budget cap (FR-23) is optional and off by default.
-- **Authentication:** simple shared login or none, relying on the internal network. No per-user accounts in v1.
-- **Corrections:** user edits are stored with the producing model and tier for later manual review of thresholds; no automatic tuning.
-- **Research sources:** archives, academic and period sources are ranked first, news only as a supplement; domain allow/deny lists are configurable. Research covers the open web only in v1.
-- **Web search (v1):** Anthropic's built-in web search tool. A dedicated search API can be added later through the search adapter (e.g. for domain allow-lists).
+- Upload scans and PDFs, including multi-page files, and choose which pages to read.
+- Get OCR, with the text tied to regions on the page, plus a short explanation of the page.
+- Ask questions. Answers cite the document (page and region) and, when they use them, web or library sources. A check after the answer drops or flags any claim that has no citation.
+- Search open libraries for related documents.
+- Translate a transcription into Indian languages (and other languages the configured model can handle).
+- Keep notes on a document.
+- Export DOCX, Markdown, JSON, BibTeX, and TEI. The searchable PDF and plain text from v0.2 stay available.
 
-### Implementation status (v0.2)
-| Area | Status |
+Documents and API keys stay on the machine that runs the app. Nothing is uploaded to a hosted Archive Workbench service, because there isn't one in v1.
+
+## 2. What stays from v0.2
+
+These behaviours were built and checked against sample pages (a British Library Minute Paper, Elphinstone letters, and Dharwar material). They remain requirements.
+
+- Single and batch upload. A bad file is rejected on its own and does not fail the batch.
+- File types: PDF, PNG, JPEG, TIFF, WEBP. Type is detected from magic bytes, not the extension. Encrypted or corrupt files get a clear error. Limits, configurable: 50 files per batch, 100 MB per file, 500 pages per file.
+- Page selection at upload (`1-5, 8, 12-`) and again later. Unselected pages are not sent to an OCR engine. They can still be previewed.
+- Start and stop. Stopping finishes the page in progress and keeps finished pages. The rest can be run later.
+- A provider failure that will hit every page (bad key, no credit) stops the run with a plain message. Finished pages are kept.
+- The intermediate representation is still the contract between stages: ordered blocks with a type (heading, paragraph, list item, table, figure, marginalia, other), text, optional table rows, and a confidence. Tables export as real Word tables and as Markdown pipe tables.
+- Reading order is preserved. Two columns are read one column at a time. Unreadable words are marked `[illegible]`; uncertain readings are marked `[word?]`. Scanner footers and watermarks are omitted.
+- The review flag is driven by those markers (three or more) or by a very low confidence (under 0.6). A self-reported confidence around 0.8 does not flag a page.
+- The user can correct a page. The model's original blocks are kept.
+- Born-digital PDFs with a usable text layer skip OCR. The user can force OCR.
+- Blank pages are detected and not sent to a model.
+- Complexity signals (blur, contrast, ink density, background unevenness) and tier routing remain for vision OCR. Historical scans are biased to the strongest configured vision model. If confidence is under 0.85 the page is escalated once.
+- Research treats the document and fetched pages as data, not as instructions.
+- Optional shared password. Empty password means no login, which matches an internal or single-user install.
+
+Translation was specified in v0.2 and not built. It is in v1, and the first targets are Indian languages rather than only English and major European languages. Web research no longer depends on Anthropic's built-in search tool. Library connectors and the model's own knowledge, grounded by retrieval, take that role. A general web-search API can still be added behind the same connector interface.
+
+## 3. Architecture
+
+```
+Browser (Next.js) ──► API (FastAPI) ──► Postgres 16
+                         │                 pgvector + full-text search
+                         │                 job queue (SKIP LOCKED)
+                         └── files on disk (page images, originals)
+
+Worker process ──► same Postgres queue
+               ├── Tesseract OCR (default)
+               ├── vision OCR through LiteLLM (only with a user key)
+               ├── embeddings
+               ├── translate
+               └── read → retrieve → answer → verify
+```
+
+| Piece | Choice |
 |---|---|
-| Upload (single/multi), validation, per-file rejection | Built |
-| OCR via Claude with tier routing and escalation; table rows, figures, marginalia as separate blocks | Built; prompt tuned on sample pages from `Minute Paper`, `Letters ... Elphinstone`, `Doc-7`, `Dharwar` |
-| Exports: DOCX (real tables), searchable PDF, TXT, MD, JSON | Built (PDF text layer is page-level, not word-aligned) |
-| Review flag | Built, driven by count of `[illegible]` / `[word?]` markers, not model self-reported confidence (which read 0.78-0.88 on well-transcribed pages) |
-| Side-by-side viewer, edit and save corrections (originals kept) | Built |
-| Page selection: per-file range at upload (`1-5, 8, 12-`), OCR more pages or a single page later, page-status strip; unselected pages cost nothing and can still be previewed | Built |
-| Start / Stop: staged upload with Start, Stop after the current page (finished pages kept), resume; Stop on research discards the result (the in-flight call is still billed) | Built |
-| Provider failures: billing/auth errors stop the whole run with a plain-language message instead of failing every page | Built |
-| Ask bar: question box always visible above both tabs; runs web research and opens the results | Built |
-| Web research with citations, depth levels, domain allow-list, follow-up, DOCX/MD export | Built (basic search variant; see FR-46). Runs on the original-language transcript |
-| Translation (M2) | **Not built**; research currently reads the untranslated transcript |
-| Local OCR tier, deskew, per-word coordinates, Settings page for key, job resume after restart | Not built |
-| Research cost | A standard run on one 2-page document used about 250K input tokens (roughly $1 on `claude-opus-5-5`); `MODEL_RESEARCH` is configurable |
+| API | FastAPI, Python |
+| Database | Postgres 16, image `pgvector/pgvector:pg16` |
+| Retrieval | Hybrid: Postgres full-text search plus pgvector cosine similarity |
+| Queue | Rows in Postgres, claimed with `FOR UPDATE SKIP LOCKED`. No Redis |
+| Worker | Separate process, same codebase as the API |
+| UI | Next.js (App Router, TypeScript), OpenSeadragon for the page |
+| OCR default | Tesseract, offline, `eng+kan+mar+hin` |
+| OCR optional | Claude or Gemini vision when the user sets a key. Kraken is not in v1 |
+| Models | LiteLLM used as a library. Anthropic, Gemini, OpenAI, Ollama |
+| Agent | Plain Python. LangGraph is deferred to v2 |
+| Embeddings | `intfloat/multilingual-e5-small` (384 dimensions) via sentence-transformers, unless an API embedding model is configured |
+| Run | `docker compose up` starts `db`, `api`, `worker`, and `web` |
 
-## 2. Users and scenarios
+The API process serves HTTP and writes jobs. The worker claims jobs. OCR, embedding, explanation, translation, and question answering run in the worker so a long page does not tie up a request.
 
-| Persona | Scenario |
-|---|---|
-| Researcher / archivist | Uploads 200 scanned pages of a 19th-century book, wants searchable PDF plus an English DOCX. |
-| Business user | Uploads one invoice in German, wants an English PDF. |
-| Developer | Calls the REST API with their own key to process documents in a pipeline. |
+## 4. OCR
 
-## 3. Functional requirements
+Default engine is Tesseract. It needs no key and no network. The Docker image installs traineddata for English, Kannada, Marathi, and Hindi. The language string is configurable (`TESSERACT_LANGS`, default `eng+kan+mar+hin`). Word boxes from Tesseract are grouped into lines. Each line is a region with a pixel bounding box. Those boxes are the overlay on the page viewer.
 
-### 3.1 Upload
-- FR-1: Accept single or multiple files in one action (drag-and-drop, file picker, API multipart).
-- FR-2: Supported inputs: PDF (scanned and born-digital), PNG, JPG/JPEG, TIFF, WEBP, HEIC, DOCX (for translation-only). Multi-page TIFF and PDF are split per page.
-- FR-3: Limits (configurable): 50 files per batch, 100 MB per file, 500 pages per file. Violations are reported per file without failing the batch.
-- FR-4: Validate by magic bytes, not extension. Reject encrypted or corrupt files with a clear message (offer password prompt for encrypted PDFs).
-- FR-5: A batch is a "job"; each file is a "document"; each document has pages.
+Anuvaad's printed and handwriting models are an optional later engine for Indic pages, not the default. NLTM/Bhashini and Lipikar are the other Indic OCR projects to look at. There is no verified project under the name "IndicOCR"; that name is not used here.
 
-### 3.2 OCR
-- FR-6: Extract text with reading order, plus structure: headings, paragraphs, lists, tables, headers/footers, footnotes, and page numbers.
-- FR-7: Pre-process: deskew, denoise, contrast/binarisation, DPI normalisation, orientation detection, and page splitting for two-page spreads.
-- FR-8: Detect source language per page automatically; user may override.
-- FR-9: Return per-page and per-block confidence scores; flag low-confidence regions.
-- FR-10: Handwriting, historical typefaces, and non-Latin scripts are supported via the vision-language model tier (see 3.5).
-- FR-11: Born-digital PDFs with a text layer skip OCR and use direct extraction (user can force OCR).
+When `OCR_ENGINE` is `claude` or `gemini` and a key is set, the worker sends the page image through LiteLLM and reuses the v0.2 transcription prompt (exact spelling, `[illegible]` / `[word?]`, separate blocks for labels, handwriting, stamps, tables, figures, and marginalia). The prompt also asks for a normalised box per block so the overlay still has somewhere to land. If a box is missing, the block is placed in a vertical band in reading order. Vision OCR is skipped when no key is set; the worker uses Tesseract and records that it did so.
 
-### 3.3 Translation
-- FR-12: Target language selectable from a list of all languages the chosen model supports (searchable; ISO 639-1/BCP-47 codes in the API).
-- FR-13: Translation modes: `translated only`, `original + translation side by side`, `original then translation (interleaved by paragraph)`.
-- FR-14: Preserve structure (headings, tables, lists) and inline formatting during translation; do not translate proper names when flagged, and support a user glossary (term → fixed translation).
-- FR-15: Translate in chunks with overlap/context to keep terminology consistent across a document.
-- FR-16: Skip translation when the source language equals the target (configurable).
+Surya is not a default engine. Its weights are OpenRAIL-M and the licence limits commercial use above a revenue threshold. A Surya plug-in may be added later, off by default, for people who accept that licence.
 
-### 3.4 Output
-- FR-17: Export formats: DOCX, PDF, and also TXT, Markdown, and JSON (structured, with coordinates and confidence) for developers.
-- FR-18: PDF options: (a) searchable PDF with the original image and an invisible text layer (default), (b) reflowed PDF of the extracted/translated text (optional).
-- FR-19: DOCX uses real Word styles (Heading 1–6, Normal, Table), embedded images where detected, and page breaks matching source pages (optional).
-- FR-20: Download per document, or a ZIP for the entire batch. Output file names derive from the input name plus language code, e.g. `report.fr.docx`.
-- FR-21: Right-to-left languages (Arabic, Hebrew, Urdu) and CJK render correctly, with appropriate fonts embedded.
+Kraken is a possible later engine for handwritten lines. It is not required for v1.
 
-### 3.5 Model configuration and automatic routing
-- FR-22: The user can supply an API key and optionally an endpoint/base URL per provider. Providers are accessed through a common adapter interface (see 5.3). v1 adapters: Anthropic (Claude) and a local/open-source OCR engine (e.g. Tesseract or PaddleOCR) that needs no key. OpenAI-compatible endpoints and Google (Gemini) are post-v1.
-- FR-23: Modes:
-  - **Auto** (default): the router picks the model per document, or per page.
-  - **Fixed**: the user pins a model for OCR and/or translation.
-  - **Budget cap**: the user sets a maximum cost per job; the router degrades to cheaper models and warns when the cap would be exceeded.
-- FR-24: Complexity scoring runs before OCR and produces a tier. Inputs:
+After OCR, the worker writes a short explanation of the document. With no model key this is extractive: the first lines of the transcription and the page count. With a key, a short model call writes the explanation and must quote the transcription rather than invent context.
 
-  | Signal | How measured |
-  |---|---|
-  | Image quality | Resolution, blur (Laplacian variance), noise, skew, contrast |
-  | Layout complexity | Number of columns, tables, figures, mixed orientation (via a lightweight layout detector) |
-  | Content type | Printed vs. handwritten vs. mixed (classifier) |
-  | Script / language | Latin vs. complex scripts (Arabic, Devanagari, CJK), historical orthography |
-  | Text layer | Present and trustworthy vs. absent |
-  | Size | Page count, text density |
+## 5. Embeddings and hybrid search
 
-- FR-25: Tiers and default routing. Model IDs are configuration, not hard-coded; defaults below use the Claude family and must be confirmed against the benchmark:
+Each region is packed into a chunk of roughly 500 characters, staying inside a page. Chunks are embedded with `intfloat/multilingual-e5-small` (prefix `query:` for the question and `passage:` for the text, as that model expects). The vector column is `vector(384)`.
 
-  | Tier | Typical document | OCR route | Translation route |
-  |---|---|---|---|
-  | 1 – Simple | Clean printed single column, or born-digital | Local OCR engine / direct text extraction | Haiku-class (`claude-haiku-5-5`) |
-  | 2 – Moderate | Printed with tables, multi-column, average scans | Sonnet-class vision (`claude-sonnet-5-5`) | Sonnet-class |
-  | 3 – Complex | Handwriting, degraded or historical print, dense tables, non-Latin scripts | Most capable available model (`claude-opus-5-5` or `claude-fable-5-1`) | Same as OCR route |
+An API embedding model may be set with `EMBEDDING_PROVIDER=api`. It must return 384 dimensions (for example an OpenAI model called with a dimensions parameter). A mismatch is an error, not a silent truncate.
 
-  Because the corpus is mostly historical, the scorer's default thresholds are biased upward: handwriting, degraded scans and pre-20th-century typefaces go straight to Tier 3 without a Tier 1 attempt.
+Search inside the workbench combines, per chunk:
 
-- FR-26: Routing is per page, so one mixed document can use different tiers. Pages are re-routed upward automatically when confidence falls below a threshold (default 0.85): escalate once to the next tier, then flag for review.
-- FR-27: Routing is explainable: the result shows the tier, score, signals, chosen model, cost and tokens used for every page. Users can re-run a page with a different model.
-- FR-28: If the user supplies only one key or provider, the router restricts itself to that provider's models and says so.
-- FR-29: Fall back to another configured model on provider errors, rate limits, or content refusals, with bounded retries and exponential backoff.
+- a full-text rank (`websearch_to_tsquery` on the `simple` configuration, so Indian-language text is not dropped by an English stemmer)
+- a cosine similarity on the embedding
 
-### 3.6 Review and correction
-- FR-30: Side-by-side viewer: source page image with highlighted blocks and the extracted text. Low-confidence blocks are highlighted.
-- FR-31: Users can edit extracted text before translation/export; edits are kept and re-export is possible without re-running OCR.
+The two ranks are min-max scaled and added with equal weight. Results point at a document, a page, and a region.
 
-### 3.7 Job management
-- FR-32: Asynchronous processing with a job queue; the UI shows status per document and page (`queued`, `preprocessing`, `ocr`, `translating`, `exporting`, `done`, `failed`).
-- FR-33: Partial success: failed documents do not fail the batch; they can be retried individually.
-- FR-34: Job history with retention (default 30 days), after which files are deleted.
-- FR-35: Optional webhook or email notification on completion.
+`EMBEDDING_PROVIDER=hash` exists for tests. It is not the default.
 
-### 3.8 Contextual research (web search and Q&A)
+## 6. Questions and the verifier
 
-After OCR and translation, the user can ask the system to research the document: find related incidents, background, people, places, events and any other information relevant to the content or to a question the user asks about it.
+Asking a question enqueues an `ask` job. The worker runs four steps, in order, in ordinary Python functions:
 
-- FR-36: **Research panel** on each document (and on a whole batch), with two entry points:
-  - **Auto-brief**: one click generates a context report from the document alone (key entities, dates, places, events, claims worth verifying, and related incidents).
-  - **Ask**: a free-text question, e.g. "What happened at this event?", "Are there similar incidents?", "Who is the person named on page 3?". The answer must draw on both the document and the web.
-- FR-37: **Entity and topic extraction**: before searching, the system extracts entities (people, organisations, places, dates, events, legal or technical terms) and the main topics from the translated and original text, and shows them to the user. Users can select, deselect or add entities to steer the search.
-- FR-38: **Query planning**: the system turns the document context and the user's question into several search queries (including queries in the document's original language and in the target language, and with historical place or name variants), runs them, and iterates when results are thin (bounded, default max 3 rounds and 20 sources).
-- FR-39: **Search depth modes**: `quick` (single round, few sources), `standard` (default), and `deep` (multi-round, cross-checking, longer report). The cost and time estimate is shown before a deep run.
-- FR-40: **Source handling**: fetch and read the pages, not only the snippets; deduplicate; record URL, title, publisher, publication date and retrieval time. Prefer reliable sources (official, archival, academic, established news) and show a source-type label. Allow/deny lists of domains are configurable by the user.
-- FR-41: **Cited answers**: every factual statement in the research output carries an inline citation to a source, and statements taken from the document itself cite the page and block. Claims that rest on a single source or on conflicting sources are marked as such. If nothing reliable is found, the system says so instead of guessing.
-- FR-42: **Related incidents view**: a timeline or list of related events with date, location, short description, how it relates to the document, and a link to the source. Users can filter by date range, place and relevance.
-- FR-43: **Follow-up conversation**: the user can continue asking follow-up questions in a chat bound to the document; context (document text, prior findings, sources) is retained for the session.
-- FR-44: **Language handling**: the user's question may be in any language; searches run in the languages that are most likely to hold relevant sources; the final answer is written in the user's chosen language.
-- FR-45: **Output**: the research report can be viewed in the UI and exported to DOCX, PDF or Markdown, either as a separate file or appended to the translated document as an "Annex: Context and related information", with a bibliography.
-- FR-46: **Provider choice**: the search layer is an adapter (see 5.3). Supported options: a model's built-in web search tool (when the user's chosen provider offers it) or a separate search API (e.g. Brave, Bing, Google Programmable Search, Tavily, SerpAPI) with the user's own key. The reasoning/synthesis model follows the same Auto/Fixed routing rules as 3.5; research questions are routed by question complexity (a simple lookup uses a small model, multi-source synthesis uses the strongest).
-- FR-47: **Privacy controls**: web search sends text derived from the document to external services. The system must (a) show the exact queries that were run alongside every result (implemented; approving queries *before* they run is not possible with a single server-side search call and would need a separate planning step, so it is deferred), (b) never send the full document text to a search engine, only short extracted queries, (c) support redaction of selected entities (e.g. personal names) from queries, and (d) be fully disabled in "local only" mode or by an organisation setting.
-- FR-48: **Safety and quality**: treat retrieved web content as untrusted data, never as instructions (guard against prompt injection in fetched pages); do not follow or fetch links that are unsafe or require login; show a freshness warning when sources are old for time-sensitive questions; flag possible speculation, rumours or unverified claims; respect robots.txt and site terms.
-- FR-49: **Sensitive content**: for documents that appear to concern living private individuals, medical, legal or similar sensitive material, the system shows a notice and does not run an automatic broad search about a named private individual unless the user explicitly confirms and has a legitimate purpose.
-- FR-50: **Cost and limits**: search calls, pages fetched and tokens used are tracked per research run and count toward the job budget cap (FR-23). Quotas per user and per day are configurable.
+1. **Read.** Load the question and the document title. Do not send the whole corpus.
+2. **Retrieve.** Hybrid search over that document's chunks (top 6). Then a short library search (Internet Archive, OpenAlex, Wikidata) so the answer can cite an external source when one is relevant. Library calls are skipped when the question is clearly about the page alone and the document hits are strong; they are always available from the library tab.
+3. **Answer.** With a model key, LiteLLM is asked to answer only from the numbered passages and library hits, with a `[n]` marker after every factual sentence. Without a key, the worker writes an extractive answer: each sentence quotes a retrieved passage or names a library hit and carries that item's marker. It does not pretend a model was called.
+4. **Verify.** A cheap check, no second model call. Split the answer into sentences. A sentence that states a fact must contain a `[n]` marker whose `n` is one of the retrieved sources. Anything else is removed. The reply tells the user when sentences were removed. A sentence that only says the document does not contain the answer is kept. Markers that point past the source list are stripped. If nothing remains, the user gets a clear "no supported answer" line.
 
-## 4. API (v1 sketch)
+Citations in the API are objects, not just numbers:
 
-All endpoints are under `/api/v1`, authenticated with a bearer token.
+- `kind: "document"` with `document_id`, `page`, `region_id`, and a short quote
+- `kind: "library"` with `source`, `title`, and `url`
 
-| Method | Path | Description |
+The UI turns a document citation into a jump: the viewer opens that page and highlights the region.
+
+## 7. Library connectors
+
+Every connector implements one method: `search(query, limit) -> list[Hit]`. A hit has `source`, `title`, `url`, `creators`, `date`, and `description`.
+
+| Connector | v1 | Notes |
 |---|---|---|
-| POST | `/jobs` | Create a job. Multipart: `files[]`, plus JSON `options`. Returns `job_id`. |
-| GET | `/jobs/{id}` | Job status, per-document and per-page progress, cost so far. |
-| GET | `/jobs/{id}/documents/{doc_id}` | Document metadata, routing decisions, confidence. |
-| GET | `/jobs/{id}/documents/{doc_id}/download?format=docx\|pdf\|txt\|md\|json` | Download output. |
-| GET | `/jobs/{id}/download?format=...` | ZIP of all documents. |
-| POST | `/jobs/{id}/documents/{doc_id}/pages/{n}/rerun` | Re-run a page with a specific model. |
-| PUT | `/providers/{provider}` | Set or update the provider key (admin only, write-only; never returned). |
-| GET | `/models` | Models available to the user's keys, with capabilities and prices. |
-| POST | `/jobs/{id}/documents/{doc_id}/research` | Start a research run. Body: `question` (optional), `depth`, `entities`, `languages`, `domain_allow`/`domain_deny`, `output`. Returns `research_id`. |
-| GET | `/research/{id}` | Status, extracted entities, queries run, sources, answer with citations, related-incidents list. |
-| POST | `/research/{id}/messages` | Follow-up question in the research chat. |
-| GET | `/research/{id}/download?format=docx\|pdf\|md\|json` | Export the research report. |
-| DELETE | `/jobs/{id}` | Delete job and all files, including research runs. |
+| Internet Archive | Live, no key | `advancedsearch.php` JSON API |
+| Library of Congress | Live, no key | JSON search. Hard cap of 20 requests per minute |
+| Wikidata | Live, no key | `wbsearchentities` |
+| OpenAlex | Live, no key | works search. A descriptive User-Agent is sent |
+| Gallica | Live, no key | SRU `searchRetrieve`. If the endpoint fails, that source returns an error and the others still return |
+| Europeana | Behind `EUROPEANA_API_KEY` | Without a key the source reports `not_configured` |
+| DPLA | Behind `DPLA_API_KEY` | Without a key the source reports `not_configured` |
 
-Example `options`:
+Responses are cached in Postgres, keyed by connector and normalised query, for 24 hours. Rate limits are enforced in the worker before the HTTP call. Connectors run in the API process for the library tab (they are short) and share the same cache and limiter as the ask job.
 
-```json
-{
-  "ocr": { "source_language": "auto", "force_ocr": false },
-  "translation": {
-    "target_language": "fr",
-    "mode": "side_by_side",
-    "glossary": [{ "source": "Bodleian", "target": "Bodleian" }]
-  },
-  "output": { "formats": ["docx", "pdf"], "pdf_type": "searchable" },
-  "model": {
-    "mode": "auto",
-    "max_cost_usd": 5.0,
-    "pin": { "ocr": null, "translation": null }
-  }
-}
+The HathiTrust Data API was retired in 2024. It is not a connector. NDLI and the Indian Culture portal have no public API. They are not connectors. A person can still paste a URL into notes.
+
+Trove (National Library of Australia) is a possible later connector. It is not in v1.
+
+## 8. Translation
+
+`POST /api/documents/{id}/translate` with a BCP-47 or English language name (`hi`, `kn`, `mr`, `ta`, Hindi, Kannada, …) enqueues a job. The worker translates each transcribed page. With a key, LiteLLM does it and is told to keep proper names and `[illegible]` markers. Without a key, each page is returned with a `[mock translation to {lang}]` banner and the original text, so the UI and the export can be tried offline.
+
+The translated text is stored per page and included in DOCX, Markdown, and TEI exports when present.
+
+## 9. Notes
+
+A document has many notes. Each note is a text body and a timestamp. Notes are not sent to a model unless the user asks a question that explicitly includes them (v1 does not include them automatically).
+
+## 10. Data model
+
+Postgres. Identifiers are UUIDs. Timestamps are `timestamptz`.
+
+**documents.** id, filename, title, kind (`pdf` or `image`), status (`queued`, `processing`, `done`, `done_with_errors`, `failed`, `rejected`, `stopped`), page_count, selected_pages, language, explanation, error, source_path, created_at.
+
+**pages.** id, document_id, number, status (`skipped`, `pending`, `done`, `failed`), image_path, width, height, text, translation, translation_language, ocr_engine, language, confidence, flagged, uncertain, edited, error. A generated `tsv` (`to_tsvector('simple', text)`) with a GIN index.
+
+**regions.** id, document_id, page_id, idx, type, text, x, y, w, h (pixels on the stored JPEG), confidence.
+
+**chunks.** id, document_id, page_id, region_id, page_number, text, embedding `vector(384)`, tsv GIN index, HNSW index on embedding (`vector_cosine_ops`).
+
+**notes.** id, document_id, body, created_at, updated_at.
+
+**messages.** id, document_id, role (`user` or `assistant`), content, citations (jsonb), dropped (jsonb), created_at.
+
+**jobs.** id, kind (`ocr`, `embed`, `explain`, `translate`, `ask`), document_id, payload (jsonb), status (`queued`, `running`, `done`, `failed`), run_after, locked_at, locked_by, attempts, max_attempts, error, result (jsonb), created_at, updated_at.
+
+Claim:
+
+```sql
+UPDATE jobs SET status = 'running', locked_at = now(), locked_by = :worker,
+                attempts = attempts + 1, updated_at = now()
+WHERE id = (
+  SELECT id FROM jobs
+  WHERE status = 'queued' AND run_after <= now() AND attempts < max_attempts
+  ORDER BY created_at
+  FOR UPDATE SKIP LOCKED
+  LIMIT 1
+)
+RETURNING *;
 ```
 
-## 5. Architecture
+Failed jobs with attempts left are requeued with a short delay. A job that hits `max_attempts` stays `failed`.
 
-### 5.1 Components
-```
-Web UI ──► API service ──► Object storage (originals, page images, outputs)
-              │
-              ├──► Queue ──► Workers:
-              │               1. Ingest / split / pre-process
-              │               2. Complexity scorer + router
-              │               3. OCR (adapter)
-              │               4. Structure builder
-              │               5. Translator (adapter)
-              │               6. Exporter (DOCX / PDF / others)
-              │               7. Research agent (entity extraction → query
-              │                  planning → web search → fetch/read → synthesis
-              │                  with citations)
-              └──► Database (jobs, documents, pages, routing logs, usage)
-```
+**library_cache.** connector, query, payload (jsonb), fetched_at. Primary key (connector, query).
 
-### 5.2 Processing pipeline (per page)
-1. Render page to image at 300 DPI; run pre-processing.
-2. Compute complexity signals and tier.
-3. Router selects the OCR model.
-4. OCR returns structured blocks (type, text, bbox, confidence).
-5. If confidence < threshold, escalate and repeat step 4 once.
-6. Assemble a document-level intermediate representation (IR): ordered blocks with styles and tables.
-7. Translate the IR text nodes in context-aware chunks; reattach to the structure.
-8. Export from the IR to the requested formats.
+Schema changes go through Alembic. The API runs `upgrade head` on startup.
 
-The IR (JSON) is the single source of truth between stages, which keeps OCR, translation and export independently testable and lets users re-export without re-running earlier stages.
+Files live under `DATA_DIR` (`/data` in Compose): `documents/{id}/source.*` and `documents/{id}/page_0001.jpg`. The database stores paths. `data/` is gitignored.
 
-### 5.3 Model adapter interface
-```
-OcrModel.extract(page_image, hints) -> Blocks
-TranslationModel.translate(blocks, source, target, glossary, context) -> Blocks
-ModelInfo { id, provider, supports_vision, languages, max_tokens, price_in, price_out, tier }
-SearchProvider.search(query, lang, date_range, domains) -> [Result{url, title, snippet, date}]
-PageFetcher.fetch(url) -> CleanText{text, title, published, retrieved_at}
-ResearchAgent.run(ir, question, depth, options) -> Report{answer, citations, incidents[], queries[]}
-```
-New providers are added by implementing the adapter and registering `ModelInfo`. The model-to-tier mapping lives in configuration so it can be updated as models change.
+## 11. HTTP API
 
-### 5.4 Suggested tech stack (adjustable)
-- Backend: Python (FastAPI), Celery or RQ workers, Redis queue, PostgreSQL, S3-compatible storage.
-- Preprocessing/OCR: OpenCV, PyMuPDF, Tesseract/PaddleOCR for the local tier.
-- Export: `python-docx` for DOCX; ReportLab or WeasyPrint for reflowed PDF; `ocrmypdf`-style text-layer injection for searchable PDF.
-- Frontend: React or Next.js with a PDF/image viewer.
+Prefix `/api`. No `/api/v1` prefix in this release; the v0.2 routes were a prototype surface. JSON unless noted. Errors use FastAPI's `{"detail": "..."}`.
 
-## 6. Non-functional requirements
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/health` | Database up, OCR engine, whether a model key is set, embedding provider |
+| POST | `/api/documents` | Multipart `files[]`, optional form field `options` (JSON: `pages`, `pages_by_file`, `force_ocr`, `ocr_engine`) |
+| GET | `/api/documents` | List, newest first |
+| GET | `/api/documents/{id}` | Document, pages (without image bytes), regions, notes count, latest jobs |
+| DELETE | `/api/documents/{id}` | Delete the row, chunks, files |
+| POST | `/api/documents/{id}/stop` | Stop OCR after the current page |
+| POST | `/api/documents/{id}/ocr` | Queue OCR for more pages. Body: `pages`, `redo`, `ocr_engine` |
+| GET | `/api/documents/{id}/pages/{n}` | One page, its regions, text, translation |
+| GET | `/api/documents/{id}/pages/{n}/image` | JPEG. Unread pages are rendered on demand |
+| PUT | `/api/documents/{id}/pages/{n}` | Replace blocks. Body: `{blocks: [{type, text, rows?}]}`. Originals are kept |
+| GET | `/api/documents/{id}/notes` | List notes |
+| POST | `/api/documents/{id}/notes` | `{body}` |
+| DELETE | `/api/documents/{id}/notes/{note_id}` | Delete one note |
+| GET | `/api/documents/{id}/messages` | Chat so far |
+| POST | `/api/documents/{id}/ask` | `{question}` → `{message_id, job_id}` |
+| POST | `/api/documents/{id}/translate` | `{language}` → `{job_id}` |
+| GET | `/api/documents/{id}/export?format=` | `docx`, `md`, `json`, `bibtex`, `tei`, `txt`, `pdf` |
+| GET | `/api/search?q=` | Hybrid search across documents. Optional `document_id` |
+| GET | `/api/library/search?q=&sources=` | `sources` is a comma list. Default: the four no-key connectors plus Gallica |
+| GET | `/api/jobs/{id}` | Job status and result |
+
+Upload still accepts the v0.2 page-range syntax. The response lists each file as `queued` or `rejected` with the reason.
+
+Export filenames come from the upload name: `minute-paper.docx`, and so on. BibTeX uses `@unpublished` with the title, the transcription date, and a note that the file was produced locally. TEI is TEI P5: a header with the title and licence of the export (the export, not the source document), and one `div` per page containing the regions as `p` or `table` elements. Coordinates are recorded as `facs` attributes in pixel units of the JPEG.
+
+The searchable PDF is the v0.2 behaviour: the page image plus an invisible text layer. Boxes are still line-level, not word-aligned in the PDF text layer.
+
+## 12. Interface
+
+One Next.js app. Two views, switched from the header: **Workspace** and **Library search**.
+
+### Workspace
+
+Three panes, left to right.
+
+**Library.** The documents on this machine. Each row shows the filename, status, and page count. An upload control (button and drag-and-drop) adds files. A page-range field applies to the next upload. Selecting a document loads it in the other two panes. Status text is plain: queued, reading, done, failed.
+
+**Page.** OpenSeadragon. Previous and next page, and a page field. OCR regions are drawn as boxes over the image. The box for the citation the user last clicked stays highlighted. A button toggles the overlay. The transcription for the current page sits under the image (or beside it when the window is wide): one block per region, in order. Low-confidence lines are marked. The explanation sits at the top of this pane in two or three sentences.
+
+**Chat.** The question field, the thread, and the notes. Assistant messages render `[n]` as buttons. A document citation moves the viewer to that page and region. A library citation is a link that opens in a new tab. Notes are a list with an add box.
+
+The panes have landmarks (`nav`, `main`, the chat as a complementary region). Every control has a visible name. Focus is visible. Text and the paper background meet WCAG AA contrast. The layout stacks vertically under 960px wide: library, page, chat.
+
+### Library search
+
+A query box, checkboxes for each connector, and a result list: title, source, date, creators, a short description, and the URL. A source that is not configured (Europeana, DPLA without a key) is shown as such, not as an empty result. Errors from one source do not hide the others.
+
+### Look
+
+Quiet. Off-white paper, near-black ink, a single dark-red accent for the current selection and for citation buttons. Serif for the document title and the transcription, sans-serif for the chrome. No dashboard cards, no gradient hero, no marketing slogans on the working screen. The header is the name "Archive Workbench" and the two views.
+
+## 13. Non-functional requirements
 
 | Area | Requirement |
 |---|---|
-| Performance | Tier 1 page ≤ 3 s; Tier 3 page ≤ 30 s end-to-end excluding queue time. 100-page job finishes in under 15 min with default concurrency. |
-| Scalability | Workers scale horizontally; per-provider concurrency limits and rate-limit aware scheduling. |
-| Accuracy targets | Printed Latin text ≥ 98% character accuracy on benchmark set; handwriting and historical text tracked separately. Measured by CER/WER on a held-out set. |
-| Reliability | Idempotent stages, per-page checkpoints, resume after worker crash. |
-| Privacy | See section 7. |
-| Accessibility | WCAG 2.1 AA for the UI; DOCX/PDF output tagged for accessibility where possible. |
-| Observability | Structured logs, per-stage metrics, cost and token tracking per job, tracing by job id. |
-| Localisation | UI strings externalised for translation. |
+| Privacy | Originals, page images, transcriptions, notes, and chats stay in local Postgres and `DATA_DIR`. Keys live in `.env` or the environment, never in the database, never in the UI after save, never in logs. The health endpoint reports only whether a key is set |
+| Local only | With no `LLM_API_KEY`, OCR is Tesseract, answers are extractive, translation is the mock banner. No call is made to a model vendor |
+| Leaving the machine | Vision OCR, model answers, model translation, and API embeddings send data out. The health endpoint shows the mode. Library search sends the query only, not the document |
+| Auth | Optional `APP_PASSWORD` (HTTP basic), as in v0.2. No accounts, no SSO in v1 |
+| Retention | No automatic deletion. The user deletes a document when they want it gone |
+| Accessibility | WCAG 2.1 AA for the chrome and the transcription. The page image has a text alternative (the transcription) |
+| Performance | A two-page scan finishes OCR without a model in well under a minute on a laptop, not counting the first embedding-model download. Library search returns or fails per source within 20 seconds |
+| Reliability | The worker can be killed and started again. Jobs left `running` longer than 15 minutes are returned to the queue. Page images are written before the page is marked done |
+| Ports | Web on 3000, API on 8000, Postgres on 5432 |
 
-## 7. Security and privacy
+## 14. Configuration
 
-- API keys can be set in server configuration (environment variables) or entered in the Settings page (your original "give the API key" requirement). Keys entered in the UI are stored encrypted on the server, write-only (never shown again or returned by the API), redacted from logs, and used only server-side. One shared key set per deployment; a per-user key vault is out of scope for v1.
-- Uploaded files and outputs are encrypted at rest and in transit (TLS 1.2+), isolated per user, and deleted after the retention window or on request.
-- Documents are sent only to the providers the user has configured. The UI tells the user clearly when a document will leave the system (any non-local model) and offers a "local only" mode.
-- No document content is used for training by this platform; provider data policies are shown next to each provider.
-- Malware scanning of uploads; sandboxed rendering of PDFs and Office files; zip-bomb and decompression limits.
-- Rate limiting and per-user quotas; audit log of key changes and deletions.
-- Research (3.8): search queries are minimal and optionally redacted; fetched web content is sandboxed and treated as untrusted (prompt-injection defence); search-provider keys are handled like model keys; research outputs are stored with the job and deleted with it.
-- Copyright/legal: the user is responsible for having rights to process uploaded material; this is stated in the terms.
+See `.env.example`. The names that matter:
 
-## 8. Error handling
+| Variable | Default | Meaning |
+|---|---|---|
+| `DATABASE_URL` | local Compose URL | Postgres |
+| `DATA_DIR` | `/data` in Compose, `./data` without | Files |
+| `LLM_API_KEY` | empty | Any key LiteLLM will accept for `LLM_MODEL` |
+| `LLM_MODEL` | `anthropic/claude-sonnet-4-5` | LiteLLM model id. Examples: `gemini/gemini-2.0-flash`, `openai/gpt-4o-mini`, `ollama/llama3.2` |
+| `LLM_API_BASE` | empty | For Ollama or a proxy |
+| `OCR_ENGINE` | `tesseract` | `tesseract`, `claude`, or `gemini` |
+| `TESSERACT_LANGS` | `eng+kan+mar+hin` | Passed to Tesseract |
+| `EMBEDDING_PROVIDER` | `local` | `local`, `api`, or `hash` |
+| `EMBEDDING_MODEL` | `intfloat/multilingual-e5-small` | Local model name, or the API model when provider is `api` |
+| `EUROPEANA_API_KEY` | empty | Europeana |
+| `DPLA_API_KEY` | empty | DPLA |
+| `APP_PASSWORD` | empty | Optional basic auth |
 
-| Case | Behaviour |
-|---|---|
-| Unreadable or blank page | Mark page `failed: unreadable`, continue with the rest. |
-| Provider key invalid or out of quota | Pause affected pages, notify the user, offer to switch model or retry. |
-| Unsupported language for the chosen model | Suggest another model or route automatically if in Auto mode. |
-| Budget cap reached | Stop paid calls, finish the remaining pages with the local tier if possible, report clearly. |
-| Output too large | Split ZIP, or offer per-document download. |
+`ANTHROPIC_API_KEY` is still read if `LLM_API_KEY` is empty, so a v0.2 `.env` keeps working.
 
-## 9. Testing and evaluation
+## 15. Repository layout
 
-- Unit tests per stage using IR fixtures.
-- Golden-set benchmark: 200+ pages across printed, tabular, multi-column, handwritten, historical, degraded and non-Latin scripts, with ground truth. Report CER/WER, table-structure accuracy, and translation quality (human review plus an automated metric such as COMET/chrF).
-- Router evaluation: compare Auto against always-cheapest and always-best on cost and accuracy; the target is within 1% accuracy of always-best at ≥ 40% lower cost on a mixed set.
-- Export validation: open generated DOCX/PDF in Word, LibreOffice and common PDF readers; automated checks for fonts, RTL and page counts.
-- Research evaluation: a set of documents with questions and reference answers; measure citation accuracy (every claim supported by its cited source), hallucination rate, relevance of related incidents, and behaviour when no sources exist. Include prompt-injection test pages.
-- Load test: 50 concurrent jobs of 100 pages each.
+```
+api/archive_workbench/     Python package (API, worker, OCR, agent, connectors, export)
+api/alembic/               migrations
+api/Dockerfile
+web/                       Next.js app
+tests/                     pytest
+docker-compose.yml
+Makefile
+.env.example
+spec.md
+README.md
+```
 
-## 10. Milestones
+The v0.2 modules (`pipeline`, `export`, `ingest`, `ir`, `signals`, `ranges`, the Claude OCR prompt) live under `api/archive_workbench/` and are called by the worker. They are not a second application.
 
-| Phase | Scope |
-|---|---|
-| M1 – Core (3–4 wks) | Single and multi upload, preprocessing, local OCR, one cloud model adapter, IR, DOCX/PDF export, job status UI. |
-| M2 – Translation (2–3 wks) | Translation stage, language picker, side-by-side modes, glossary, RTL/CJK output. |
-| M3 – Routing (3 wks) | Complexity scorer, tiers, confidence-based escalation, explainability UI, Settings page for API key entry, budget cap. |
-| M4 – Research (3–4 wks) | Entity extraction, query planning, search/fetch adapters, cited answers, related-incidents view, follow-up chat, report export, privacy controls. |
-| M5 – Review and API (2–3 wks) | Review/edit viewer, public REST API, webhooks, ZIP export, retention jobs. |
-| M6 – Hardening (2 wks) | Benchmarking, load testing, security review, accessibility audit. |
+## 16. Acceptance criteria
 
-## 11. Open questions
+A fresh clone, with Docker Desktop on an Apple Silicon Mac, passes the following. The same checks are what this repository's tests and the maintainer's run cover.
 
-All v1 questions are resolved (see Decisions in section 1). Items deferred past v1:
+1. `cp .env.example .env` then `docker compose up --build` brings up db, api, worker, and web. `http://localhost:3000` loads the workspace.
+2. `GET /api/health` reports a database connection and `llm: false` when no key is set.
+3. Uploading a scanned PDF queues an OCR job. The worker runs Tesseract. The document reaches `done` or `done_with_errors`. Page text is non-empty for a page that has writing. Regions have boxes.
+4. Asking a question returns an assistant message whose factual sentences each carry a citation the verifier accepted. At least one citation is a document page and region when the transcription contains relevant text. Clicking it in the UI moves the viewer.
+5. Library search for a known term (for example `Kittur`) returns hits from Internet Archive or OpenAlex or Wikidata or the Library of Congress, without a key.
+6. Europeana and DPLA report `not_configured` when their keys are empty.
+7. Adding a note and reloading the document shows the note.
+8. Translate to `hi` stores a translation. Without a key it is marked mock.
+9. Export DOCX, Markdown, JSON, BibTeX, and TEI. DOCX opens as a zip (`PK` magic). TEI is well-formed XML.
+10. `pytest` passes against the Compose database.
+11. No PDF, no `data/`, and no `.env` are in git.
 
-- Automatic tuning of routing thresholds from user corrections.
-- Searching previously processed documents or an external catalogue during research.
-- SSO, per-user accounts and a per-user key vault.
-- Launch languages beyond English and major European (RTL, Indic, CJK).
+## 17. Tests
+
+- pytest for page ranges, export, the verifier, connector parsing (HTTP mocked), the queue claim (SKIP LOCKED), hybrid search, and the upload → OCR → ask → export path. OCR in that path uses Tesseract on a small synthetic image, or the sample minute paper when it is present outside the repo.
+- A Playwright smoke test loads the workspace, checks the three panes and the library view, and does not require a model key.
+
+## 18. How to run
+
+Docker is the supported path. The README is the procedure: copy `.env.example` to `.env`, `docker compose up --build`, open `http://localhost:3000`.
+
+Without Docker: install Postgres 16 with pgvector, Tesseract with the four language packs, Python 3.12, and Node 20 or newer. Create the database, set `DATABASE_URL` and `DATA_DIR` in `.env`, run Alembic, start the API, start the worker, and run the Next.js dev server. The README lists the commands.
+
+The first local embedding run downloads `multilingual-e5-small` (a few hundred megabytes) into the Hugging Face cache.
+
+## 19. Corrections recorded here
+
+- The HathiTrust Data API was retired in 2024. Do not integrate it.
+- NDLI and the Indian Culture portal have no public API.
+- "IndicOCR" is not a verified project name. Indic OCR options to track are NLTM/Bhashini, Lipikar, and Anuvaad.
+- Surya's weights are OpenRAIL-M with a revenue limit. Optional plug-in only, not a default and not shipped in v1.
+
+## 20. v2 roadmap
+
+Not scheduled, and not required for the acceptance criteria above.
+
+- LangGraph (or a similar graph runtime) for the agent, once the plain pipeline has been used on real research sessions
+- An MCP server so other tools can call the workbench
+- Langfuse tracing
+- A reranker in front of the hybrid results
+- IndicTrans2 for translation that does not need a commercial key
+- A notebook and a book-writer on top of notes and cited answers
+- Trove connector
+- Surya as an opt-in OCR plug-in
+- Mirador and IIIF, for manifests from libraries that publish them
+- Timeline and map views of entities
+- SSO and accounts
+- Azure deployment: Container Apps, Azure Database for PostgreSQL, Blob storage, Key Vault
+- Modi script OCR
+
+## 21. Out of scope for v1
+
+Real-time camera OCR, training models, a mobile app, per-user accounts, automatic threshold tuning, word-aligned PDF text layers, and editing the scan itself.
