@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Archive OCR</title>
+<style>
+:root{--bg:#f6f5f1;--panel:#fff;--fg:#1f1e1b;--mut:#6d6a62;--line:#e0ddd4;--acc:#7a2e1d;--acc2:#f3e6e1;--ok:#2d6a3e;--bad:#a02323;--warn:#fff2c2;--warnfg:#7a5a00;
+--ui:system-ui,-apple-system,"Segoe UI",sans-serif;--serif:Georgia,"Times New Roman",serif}
+@media (prefers-color-scheme:dark){:root{--bg:#141413;--panel:#1d1d1b;--fg:#ecebe6;--mut:#9b988f;--line:#34332f;--acc:#e3947e;--acc2:#2c1f1b;--ok:#76c48c;--bad:#e88282;--warn:#3a3114;--warnfg:#f0d27a}}
+*{box-sizing:border-box}html,body{height:100%}body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 var(--ui)}
+button,select,input,textarea{font:inherit;color:inherit}
+button{padding:6px 12px;border:1px solid var(--line);background:var(--panel);border-radius:6px;cursor:pointer}
+button:hover{border-color:var(--acc)}button.p{background:var(--acc);color:#fff;border-color:var(--acc)}button:disabled{opacity:.5;cursor:default}
+a{color:var(--acc)}
+#app{display:grid;grid-template-columns:300px 1fr;height:100vh}
+aside{border-right:1px solid var(--line);background:var(--panel);display:flex;flex-direction:column;min-height:0}
+aside header{padding:14px 16px;border-bottom:1px solid var(--line)}
+aside h1{font:600 1rem var(--serif);margin:0}
+#mode{font-size:.75rem;color:var(--mut);margin-top:2px}#mode.warn{color:var(--bad)}
+#drop{margin:12px;border:2px dashed var(--line);border-radius:8px;padding:18px 10px;text-align:center;color:var(--mut);cursor:pointer;font-size:.85rem}
+#drop.over,#drop:hover{border-color:var(--acc);color:var(--fg)}
+#list{overflow:auto;flex:1;padding:0 12px 12px}
+.doc{padding:8px 10px;border:1px solid var(--line);border-radius:8px;margin-top:8px;cursor:pointer;background:var(--bg)}
+.doc.sel{border-color:var(--acc);background:var(--acc2)}.doc b{display:block;font-weight:600;word-break:break-word;font-size:.85rem}
+.sm{font-size:.75rem;color:var(--mut)}.ok{color:var(--ok)}.bad{color:var(--bad)}
+.bar{height:4px;background:var(--line);border-radius:2px;margin-top:6px;overflow:hidden}.bar i{display:block;height:100%;background:var(--acc);transition:width .3s}
+main{display:flex;flex-direction:column;min-width:0;min-height:0}
+#empty{margin:auto;color:var(--mut);text-align:center;padding:24px}
+#head{padding:12px 20px;border-bottom:1px solid var(--line);background:var(--panel);display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+#head h2{font:600 1.05rem var(--serif);margin:0;flex:1;min-width:200px;word-break:break-word}
+.tabs{display:flex;gap:2px;padding:0 20px;background:var(--panel);border-bottom:1px solid var(--line)}
+.tab{padding:9px 14px;border:0;border-bottom:2px solid transparent;border-radius:0;background:none}
+.tab.on{border-bottom-color:var(--acc);color:var(--acc);font-weight:600}
+.pane{flex:1;min-height:0;overflow:auto}
+#viewer{display:grid;grid-template-columns:minmax(260px,1fr) minmax(320px,1.1fr);height:100%}
+#imgwrap{overflow:auto;background:#2a2926;padding:10px;position:relative}
+#imgwrap img{width:100%;display:block;border-radius:2px;transition:width .15s}
+#imgwrap.zoom img{width:220%}
+#text{overflow:auto;padding:14px 22px 40px;background:var(--panel)}
+.pbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px;position:sticky;top:-14px;background:var(--panel);padding:10px 0;z-index:2;border-bottom:1px solid var(--line)}
+.chip{font-size:.72rem;padding:2px 8px;border-radius:99px;border:1px solid var(--line);color:var(--mut)}
+.chip.w{background:var(--warn);color:var(--warnfg);border-color:transparent}.chip.g{color:var(--ok)}
+.blk{margin:0 0 14px;font:1rem/1.6 var(--serif);position:relative;padding-left:0}
+.blk .t{display:block;font:600 .65rem var(--ui);text-transform:uppercase;letter-spacing:.06em;color:var(--mut);margin-bottom:1px}
+.blk.heading .x{font-weight:700;font-size:1.15rem}.blk.marginalia .x{font-style:italic;color:var(--mut);border-left:3px solid var(--line);padding-left:10px}
+.blk.figure .x{background:var(--bg);padding:8px 10px;border-radius:6px;font-style:italic}
+.x{white-space:pre-wrap}
+mark.u{background:var(--warn);color:var(--warnfg);border-radius:3px;padding:0 2px}
+table.tb{border-collapse:collapse;font:.9rem var(--ui);width:100%}table.tb td{border:1px solid var(--line);padding:5px 8px;vertical-align:top}
+textarea.e{width:100%;min-height:70px;padding:8px;border:1px solid var(--line);border-radius:6px;background:var(--bg);font:1rem/1.55 var(--serif);resize:vertical}
+#res{max-width:860px;margin:0 auto;padding:20px 22px 60px}
+#res label{display:block;font-size:.8rem;color:var(--mut);margin:12px 0 4px}
+#res textarea,#res input,#res select{width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:6px;background:var(--panel)}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:end}.row>*{flex:1;min-width:140px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 18px;margin-top:16px}
+.md h2{font:600 1.05rem var(--serif);margin:18px 0 6px;color:var(--acc)}.md h3{font-size:.95rem}.md p{margin:6px 0;font-family:var(--serif);line-height:1.6}
+.md ul{margin:6px 0 6px 18px;padding:0;font-family:var(--serif)}.md li{margin:4px 0}
+sup.c a{text-decoration:none;font-weight:600}
+.src li{font-size:.85rem;font-family:var(--ui);word-break:break-word}
+.spin{display:inline-block;width:12px;height:12px;border:2px solid var(--line);border-top-color:var(--acc);border-radius:50%;animation:s 1s linear infinite;vertical-align:-2px;margin-right:6px}
+@keyframes s{to{transform:rotate(360deg)}}
+#stage{margin:0 12px 8px;border:1px solid var(--line);border-radius:8px;padding:8px 10px;background:var(--bg)}
+#stage .f{padding:6px 0;border-bottom:1px solid var(--line)}#stage .f:last-of-type{border-bottom:0}
+#stage input{width:100%;margin-top:3px;padding:5px 8px;border:1px solid var(--line);border-radius:6px;background:var(--panel);font-size:.8rem}
+#bar2{background:var(--panel);border-bottom:1px solid var(--line);padding:8px 20px;display:flex;flex-direction:column;gap:8px}
+#bar2 .r{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+#bar2 input[type=text]{padding:6px 10px;border:1px solid var(--line);border-radius:6px;background:var(--bg);min-width:140px}
+#ask{padding:10px 20px 12px;background:var(--acc2);border-bottom:2px solid var(--acc)}
+#ask b{display:block;font-size:.8rem;color:var(--acc);margin-bottom:5px}
+#ask .r{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+#ask input{flex:1;min-width:240px;padding:9px 12px;border:1px solid var(--acc);border-radius:8px;background:var(--panel);font-size:.95rem}
+#ask select{padding:8px;border:1px solid var(--line);border-radius:6px;background:var(--panel)}
+button.stop{border-color:var(--bad);color:var(--bad)}button.go{background:var(--ok);border-color:var(--ok);color:#fff}
+#strip{display:flex;gap:3px;flex-wrap:wrap;max-height:64px;overflow:auto}
+.pill{min-width:26px;height:22px;padding:0 5px;font-size:.7rem;border-radius:5px;border:1px solid var(--line);background:var(--bg);color:var(--mut);cursor:pointer;line-height:20px;text-align:center}
+.pill.done{background:var(--ok);border-color:var(--ok);color:#fff}.pill.failed{background:var(--bad);border-color:var(--bad);color:#fff}
+.pill.pending{background:var(--warn);color:var(--warnfg);animation:pl 1.2s ease-in-out infinite}.pill.cur{outline:2px solid var(--acc);outline-offset:1px}
+.pill.flag::after{content:'•';margin-left:2px;color:#ffd24d}
+@keyframes pl{50%{opacity:.5}}
+.skip{padding:30px 10px;text-align:center;color:var(--mut)}
+.docbtn{float:right;padding:2px 8px;font-size:.72rem}
+@media (max-width:820px){#app{grid-template-columns:1fr;grid-template-rows:auto 1fr}aside{max-height:42vh;border-right:0;border-bottom:1px solid var(--line)}#viewer{grid-template-columns:1fr;grid-template-rows:42vh auto}}
+</style></head><body>
+<div id="app">
+<aside>
+  <header><h1>Archive OCR <span class="sm" style="font-weight:400">v0.3</span></h1><div id="mode">&nbsp;</div></header>
+  <div id="drop" tabindex="0">Drop PDFs or images here<br><span class="sm">or click to choose (multiple allowed)</span>
+    <input id="file" type="file" multiple hidden accept=".pdf,.png,.jpg,.jpeg,.tif,.tiff,.webp"></div>
+  <div id="stage" hidden></div>
+  <div id="list"></div>
+</aside>
+<main>
+  <div id="empty"><p style="font:1.1rem var(--serif)">Upload a document to begin</p><p class="sm">Pages are transcribed with Claude. Then review them beside the original, export, or research the context on the web.</p>
+  <p class="sm"><b>Already uploaded something?</b> Click it in the list on the left. The question box (“Ask about this document”) and the OCR controls appear at the top once a document is selected.</p></div>
+  <div id="doc" hidden style="display:none;flex-direction:column;min-height:0;flex:1">
+    <div id="head"><h2 id="title"></h2><span id="dl"></span></div>
+    <div id="ask"><b>Ask about this document</b>
+      <div class="r"><input type="text" id="askq" placeholder="e.g. Who is the person named here, and what happened? — Claude searches the web for related incidents and context">
+        <select id="askd" title="How many searches"><option value="quick">Quick</option><option value="standard" selected>Standard</option><option value="deep">Deep</option></select>
+        <button class="p" id="askbtn">🔎 Ask &amp; search web</button></div></div>
+    <div class="tabs"><button class="tab on" data-t="tr">Transcript</button><button class="tab" data-t="rs">Ask &amp; web search</button></div>
+    <div id="bar2">
+      <div class="r"><b class="sm" style="color:var(--fg)">OCR</b><span class="sm" id="ocrstat"></span><div id="strip" style="flex:1 1 100%"></div></div>
+      <div class="r"><input type="text" id="pgs" placeholder="Pages: e.g. 1-5, 8, 12-  (blank = all remaining)" style="flex:1;min-width:200px">
+        <button class="go" id="startbtn">▶ Start OCR</button><button class="stop" id="stopbtn" hidden>■ Stop</button></div>
+    </div>
+    <div class="pane" id="p-tr"><div id="viewer"><div id="imgwrap" title="Click to zoom"><img id="img" alt="page image"></div><div id="text"></div></div></div>
+    <div class="pane" id="p-rs" hidden></div>
+  </div>
+</main></div>
+<script>
+const API='/api/v1',$=s=>document.querySelector(s);
+const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+let jobs=[];try{jobs=JSON.parse(localStorage.getItem('jobs')||'[]')}catch(e){}
+let state={job:null,doc:null,page:1,detail:null,docs:{},edit:false,tab:'tr',rid:null,pollR:null};
+const save=()=>{try{localStorage.setItem('jobs',JSON.stringify(jobs.slice(0,15)))}catch(e){}};
+
+fetch(API+'/models').then(r=>r.json()).then(m=>{const e=$('#mode');
+ if(m.mode==='mock'){e.textContent='⚠ Mock mode: no API key, placeholder text';e.className='warn'}else e.textContent='Claude connected'});
+
+/* ---------- upload + library ---------- */
+const drop=$('#drop'),inp=$('#file');
+drop.onclick=()=>inp.click();drop.onkeydown=e=>{if(e.key==='Enter')inp.click()};
+drop.ondragover=e=>{e.preventDefault();drop.classList.add('over')};drop.ondragleave=()=>drop.classList.remove('over');
+drop.ondrop=e=>{e.preventDefault();drop.classList.remove('over');stageFiles(e.dataTransfer.files)};inp.onchange=()=>{stageFiles(inp.files);inp.value=''};
+let staged=[];
+function stageFiles(files){staged.push(...[...files]);renderStage()}
+function renderStage(){const el=$('#stage');if(!staged.length){el.hidden=true;return}el.hidden=false;
+ el.innerHTML=`<div class="sm" style="margin-bottom:4px"><b style="color:var(--fg)">${staged.length} file${staged.length>1?'s':''} ready</b> — choose which pages to OCR</div>`+
+  staged.map((f,i)=>`<div class="f"><span style="font-size:.8rem;word-break:break-word">${esc(f.name)}</span> <span class="sm">${(f.size/1048576).toFixed(1)} MB</span>
+   <button class="docbtn" data-rm="${i}" title="Remove">✕</button><input data-pg="${i}" placeholder="all pages  ·  or e.g. 1-5, 8, 12-"></div>`).join('')+
+  `<div style="display:flex;gap:6px;margin-top:8px"><button class="go" id="stgo" style="flex:1">▶ Start OCR</button><button id="stclr">Clear</button></div>`;
+ el.querySelectorAll('[data-rm]').forEach(b=>b.onclick=()=>{staged.splice(+b.dataset.rm,1);renderStage()});
+ $('#stclr').onclick=()=>{staged=[];renderStage()};$('#stgo').onclick=startUpload}
+async function startUpload(){const fd=new FormData(),by={};
+ staged.forEach((f,i)=>{fd.append('files',f);const v=(document.querySelector(`[data-pg="${i}"]`).value||'').trim();if(v)by[f.name]=v});
+ fd.append('options',JSON.stringify({pages_by_file:by}));$('#stgo').disabled=true;$('#stgo').textContent='Uploading…';
+ try{const r=await fetch(API+'/jobs',{method:'POST',body:fd});if(!r.ok)throw new Error(await r.text());
+  const j=await r.json();jobs.unshift(j.job_id);save();staged=[];inp.value='';renderStage();
+  const bad=j.documents.filter(d=>d.status==='rejected');if(bad.length)toast(bad.map(d=>d.filename+': '+d.error).join(' | '));
+  await refresh();const ok=j.documents.find(d=>d.status!=='rejected');if(ok)openDoc(ok.doc_id)}
+ catch(e){toast('Upload failed: '+e.message);renderStage()}}
+async function stopDoc(id,ev){if(ev)ev.stopPropagation();const d=state.docs[id];await fetch(`${API}/jobs/${d.job}/documents/${id}/stop`,{method:'POST'});
+ toast('Stopping after the current page…');refresh()}
+async function startOcr(pages){const d=state.docs[state.doc];
+ const r=await fetch(`${API}/jobs/${d.job}/documents/${d.id}/ocr`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pages:pages??$('#pgs').value.trim()})});
+ if(!r.ok){let m=await r.text();try{m=JSON.parse(m).detail}catch(e){}toast(m);return}
+ const j=await r.json();if(j.status==='nothing_to_do')toast('Those pages are already done.');$('#pgs').value='';refresh()}
+function toast(m){const e=$('#mode');e.textContent=m;e.className='warn';setTimeout(()=>fetch(API+'/models').then(r=>r.json()).then(x=>{e.textContent=x.mode==='mock'?'⚠ Mock mode':'Claude connected';e.className=x.mode==='mock'?'warn':''}),5000)}
+async function refresh(){
+ const all=[];for(const id of jobs){try{const r=await fetch(`${API}/jobs/${id}`);if(r.ok){const j=await r.json();j.documents.forEach(d=>all.push({...d,job:id}))}}catch(e){}}
+ state.docs=Object.fromEntries(all.map(d=>[d.id,d]));
+ $('#list').innerHTML=all.map(d=>{const done=d.status.startsWith('done'),pct=done?100:(d.selected_pages||d.total_pages)?Math.round(100*d.done_pages/(d.selected_pages||d.total_pages)):0;
+  const cls=d.status==='failed'||d.status==='rejected'?'bad':done?'ok':'';
+  const run=/queued|processing/.test(d.status),sel=d.selected_pages||d.total_pages;
+  return `<div class="doc ${d.id===state.doc?'sel':''}" data-id="${d.id}">${run?`<button class="docbtn stop" data-stop="${d.id}">■ Stop</button>`:''}<b>${esc(d.filename)}</b><span class="sm ${cls}">${d.status.replace('_',' ')}${d.total_pages?` · ${d.done_pages}/${sel} pages${sel<d.total_pages?` (of ${d.total_pages})`:''}`:''}</span>
+  <div class="bar"><i style="width:${pct}%"></i></div>${d.error?`<div class="sm bad">${esc(d.error)}</div>`:''}</div>`}).join('')||'<p class="sm" style="padding:8px">No documents yet.</p>';
+ document.querySelectorAll('.doc').forEach(el=>el.onclick=()=>openDoc(el.dataset.id));
+ document.querySelectorAll('[data-stop]').forEach(b=>b.onclick=e=>stopDoc(b.dataset.stop,e));
+ renderCtl();
+ if(all.some(d=>/queued|processing/.test(d.status))){setTimeout(refresh,2000);if(state.doc&&state.docs[state.doc]&&/processing/.test(state.docs[state.doc].status))loadDetail(true)}
+ else if(state.doc)loadDetail(true)}
+async function openDoc(id){const d=state.docs[id];if(!d)return;state.doc=id;state.job=d.job;state.page=1;state.edit=false;state.rid=null;
+ $('#empty').style.display='none';const dv=$('#doc');dv.hidden=false;dv.style.display='flex';$('#title').textContent=d.filename;
+ document.querySelectorAll('.doc').forEach(e=>e.classList.toggle('sel',e.dataset.id===id));
+ $('#dl').innerHTML=['docx','pdf','txt','md','json'].map(f=>`<a href="${API}/jobs/${d.job}/documents/${id}/download?format=${f}"><button>${f.toUpperCase()}</button></a>`).join(' ');
+ await loadDetail();showTab(state.tab)}
+async function loadDetail(keep){renderCtl();const d=state.docs[state.doc];const r=await fetch(`${API}/jobs/${d.job}/documents/${d.id}`);
+ if(!r.ok){state.detail={pages:[]};renderPage();return}state.detail=await r.json();renderCtl();if(!keep||state.tab==='tr')renderPage()}
+
+/* ---------- OCR controls + page strip ---------- */
+function renderCtl(){const d=state.docs[state.doc];if(!d)return;const D=state.detail,run=/queued|processing/.test(d.status);
+ $('#startbtn').hidden=run;$('#stopbtn').hidden=!run;$('#pgs').disabled=run;
+ const pg=D?D.pages:[],cnt=k=>pg.filter(p=>p.status===k).length;
+ $('#ocrstat').textContent=pg.length?`${cnt('done')} of ${pg.length} pages done${cnt('failed')?` · ${cnt('failed')} failed`:''}${run?' · running…':d.status==='stopped'?' · stopped':''}`:'';
+ $('#strip').innerHTML=pg.map(p=>`<button class="pill ${p.status} ${p.number===state.page?'cur':''} ${p.flagged?'flag':''}" data-n="${p.number}" title="Page ${p.number}: ${p.status}${p.flagged?' — check this page':''}">${p.number}</button>`).join('');
+ $('#strip').querySelectorAll('.pill').forEach(b=>b.onclick=()=>{state.page=+b.dataset.n;state.edit=false;showTab('tr')})}
+$('#startbtn').onclick=()=>startOcr();$('#stopbtn').onclick=()=>stopDoc(state.doc);
+$('#askbtn').onclick=()=>{const q=$('#askq').value.trim();if(!q){$('#askq').focus();return}runResearch({question:q,depth:$('#askd').value})};
+$('#askq').onkeydown=e=>{if(e.key==='Enter')$('#askbtn').click()};
+
+/* ---------- transcript viewer ---------- */
+document.querySelectorAll('.tab').forEach(b=>b.onclick=()=>showTab(b.dataset.t));
+function showTab(t){state.tab=t;document.querySelectorAll('.tab').forEach(b=>b.classList.toggle('on',b.dataset.t===t));
+ $('#p-tr').hidden=t!=='tr';$('#p-rs').hidden=t!=='rs';if(t==='rs')renderResearch();else renderPage()}
+$('#imgwrap').onclick=()=>$('#imgwrap').classList.toggle('zoom');
+const hl=s=>esc(s).replace(/\[illegible\]|\[[^\[\]]{1,40}\?\]/g,m=>`<mark class="u">${m}</mark>`);
+function renderPage(){const D=state.detail;if(!D||!D.pages.length){$('#text').innerHTML='<p class="sm">Waiting for the first page…</p>';return}
+ const n=Math.min(state.page,D.pages.length),p=D.pages[n-1],d=state.docs[state.doc];state.page=n;
+ $('#img').src=`${API}/jobs/${d.job}/documents/${d.id}/pages/${n}/image?${p.edited?'e':''}`;
+ const total=d.total_pages||D.pages.length;
+ let h=`<div class="pbar"><button id="pv" ${n<=1?'disabled':''}>←</button><b>Page ${n} / ${total}</b><button id="nx" ${n>=D.pages.length?'disabled':''}>→</button>
+ <span class="chip ${p.uncertain?'w':'g'}">${p.uncertain?p.uncertain+' uncertain reading'+(p.uncertain>1?'s':''):'no uncertain readings'}</span>
+ ${p.routing?`<span class="chip">tier ${p.routing.tier} · ${esc(p.routing.model)}</span>`:`<span class="chip">${esc(p.source)}</span>`}
+ ${p.language?`<span class="chip">${esc(p.language)}</span>`:''}${p.edited?'<span class="chip g">edited</span>':''}
+ <span style="flex:1"></span><button id="ed">${state.edit?'Cancel':'Edit text'}</button>${state.edit?'<button class="p" id="sv">Save</button>':''}</div>`;
+ if(p.status==='failed')h+=`<p class="bad">This page failed: ${esc(p.error)}</p>`;
+ if(p.status==='skipped'||p.status==='pending'){const run=/queued|processing/.test(d.status);
+  $('#text').innerHTML=`<div class="pbar"><button id="pv" ${n<=1?'disabled':''}>←</button><b>Page ${n} / ${total}</b><button id="nx" ${n>=D.pages.length?'disabled':''}>→</button></div>
+  <div class="skip">${p.status==='pending'?'<span class="spin"></span>Waiting to be read…':'This page has not been OCR\'d yet.<br><br>'+(run?'<span class="sm">Wait for the current run to finish, or stop it first.</span>':'<button class="go" id="one">▶ OCR this page</button>')}</div>`;
+  $('#pv').onclick=()=>{state.page--;renderPage()};$('#nx').onclick=()=>{state.page++;renderPage()};if($('#one'))$('#one').onclick=()=>startOcr(String(n));renderCtl();return}
+ if(!p.blocks.length&&p.status!=='failed')h+='<p class="sm">No text on this page.</p>';
+ p.blocks.forEach((b,i)=>{
+  if(state.edit){h+=`<div class="blk"><span class="t">${esc(b.type)}</span>${b.type==='table'?`<textarea class="e" data-i="${i}" data-table="1">${esc((b.rows||[]).map(r=>r.join(' | ')).join('\n'))}</textarea><span class="sm">One row per line, cells separated by |</span>`:`<textarea class="e" data-i="${i}">${esc(b.text)}</textarea>`}</div>`;return}
+  const body=b.type==='table'&&b.rows&&b.rows.length?`<table class="tb">${b.rows.map(r=>`<tr>${r.map(c=>`<td>${hl(c)}</td>`).join('')}</tr>`).join('')}</table>`:`<div class="x">${hl(b.text)}</div>`;
+  h+=`<div class="blk ${esc(b.type)}"><span class="t">${esc(b.type)}</span>${body}</div>`});
+ $('#text').innerHTML=h;renderCtl();
+ $('#pv').onclick=()=>{state.page--;state.edit=false;renderPage()};$('#nx').onclick=()=>{state.page++;state.edit=false;renderPage()};
+ $('#ed').onclick=()=>{state.edit=!state.edit;renderPage()};
+ if($('#sv'))$('#sv').onclick=async()=>{const blocks=[...document.querySelectorAll('textarea.e')].map(t=>{const o=p.blocks[+t.dataset.i];
+   return t.dataset.table?{type:'table',text:'',rows:t.value.split('\n').filter(l=>l.trim()).map(l=>l.split('|').map(c=>c.trim()))}:{type:o.type,text:t.value}});
+  const r=await fetch(`${API}/jobs/${d.job}/documents/${d.id}/pages/${n}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({blocks})});
+  if(!r.ok){toast('Save failed');return}state.edit=false;await loadDetail()}}
+document.addEventListener('keydown',e=>{if(state.tab!=='tr'||state.edit||/TEXTAREA|INPUT/.test(e.target.tagName)||!state.detail)return;
+ if(e.key==='ArrowRight'&&state.page<state.detail.pages.length){state.page++;renderPage()}if(e.key==='ArrowLeft'&&state.page>1){state.page--;renderPage()}});
+
+/* ---------- research ---------- */
+function md(src,sources){const S=Object.fromEntries((sources||[]).map(s=>[s.n,s]));
+ const inline=t=>esc(t).replace(/\*\*(.+?)\*\*/g,'<b>$1</b>').replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g,'<a href="$2" target="_blank" rel="noopener">$1</a>')
+  .replace(/\[(\d+)\]/g,(m,n)=>S[n]?`<sup class="c"><a href="${esc(S[n].url)}" target="_blank" rel="noopener" title="${esc(S[n].title)}">[${n}]</a></sup>`:m);
+ let out='',ul=false;for(const line of String(src||'').split('\n')){const l=line.trimEnd();
+  const li=l.match(/^\s*[-*]\s+(.*)/);if(li){if(!ul){out+='<ul>';ul=true}out+=`<li>${inline(li[1])}</li>`;continue}if(ul){out+='</ul>';ul=false}
+  const h=l.match(/^(#{1,4})\s+(.*)/);if(h){out+=`<h${Math.max(2,h[1].length)}>${inline(h[2])}</h${Math.max(2,h[1].length)}>`;continue}if(l.trim())out+=`<p>${inline(l)}</p>`}
+ return out+(ul?'</ul>':'')}
+async function renderResearch(){const d=state.docs[state.doc];const box=$('#p-rs');
+ let list=[];try{list=await (await fetch(`${API}/jobs/${d.job}/documents/${d.id}/research`)).json()}catch(e){}
+ if(!state.rid&&list.length)state.rid=list[list.length-1].id;
+ box.innerHTML=`<div id="res"><div class="card" style="margin-top:0"><b>Research this document</b><p class="sm" style="margin:4px 0 0">Searches the web for people, places and related incidents named in the transcript, and answers your question with citations. Only short search queries leave this machine, not the document.</p>
+ <label>Question (optional — leave blank for an overview)</label><textarea id="q" rows="2" placeholder="e.g. Who was Rev. Wingate and what happened with the Belgaum chaplaincy?"></textarea>
+ <div class="row"><div><label>Depth</label><select id="dp"><option value="quick">Quick (few searches)</option><option value="standard" selected>Standard</option><option value="deep">Deep (many searches, slower, costs more)</option></select></div>
+ <div><label>Only these sites (optional, comma-separated)</label><input id="dom" placeholder="e.g. archive.org, bl.uk"></div></div>
+ <p style="margin:12px 0 0"><button class="p" id="go">Run research</button> ${state.rid&&list.length?`<button id="fu">Ask as follow-up to current report</button>`:''}</p></div>
+ ${list.length>1?`<p class="sm" style="margin-top:14px">Earlier runs: ${list.map((r,i)=>`<a href="#" data-r="${r.id}">#${i+1}${r.question?' – '+esc(r.question.slice(0,40)):''}</a>`).join(' · ')}</p>`:''}
+ <div id="out"></div></div>`;
+ box.querySelectorAll('[data-r]').forEach(a=>a.onclick=e=>{e.preventDefault();state.rid=a.dataset.r;showResult()});
+ const run=fu=>{const body={question:$('#q').value.trim()||null,depth:$('#dp').value};
+  const dom=$('#dom').value.split(',').map(s=>s.trim()).filter(Boolean);if(dom.length)body.allowed_domains=dom;if(fu)body.follow_up_of=state.rid;runResearch(body)};
+ $('#go').onclick=()=>run(false);if($('#fu'))$('#fu').onclick=()=>run(true);
+ if(state.rid)showResult()}
+async function runResearch(body){const d=state.docs[state.doc];if(!d)return;if(state.tab!=='rs')showTab('rs');
+ if(state.rid&&body.follow_up_of===undefined&&false)body.follow_up_of=state.rid;
+ const r=await fetch(`${API}/jobs/${d.job}/documents/${d.id}/research`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+ if(!r.ok){let m=await r.text();try{m=JSON.parse(m).detail}catch(e){}const o=$('#out');if(o)o.innerHTML=`<div class="card bad">${esc(m)}</div>`;toast(m);return}
+ state.rid=(await r.json()).research_id;if($('#q')&&body.question)$('#q').value=body.question;showResult()}
+async function stopResearch(){await fetch(`${API}/research/${state.rid}/stop`,{method:'POST'});showResult()}
+async function showResult(){clearTimeout(state.pollR);const out=$('#out');if(!out||!state.rid)return;
+ const r=await fetch(`${API}/research/${state.rid}`);if(!r.ok)return;const R=await r.json();
+ if(R.status==='running'){out.innerHTML=`<div class="card"><span class="spin"></span>Searching and reading sources… this can take a minute or two. <button class="stop docbtn" id="rstop">■ Stop</button></div>`;$('#rstop').onclick=stopResearch;state.pollR=setTimeout(showResult,3000);return}
+ if($('#go'))$('#go').disabled=false;
+ if(R.status==='stopped'){out.innerHTML=`<div class="card">Stopped. (A search already in progress finishes on the server and may still be billed; its answer is discarded.)</div>`;return}
+ if(R.status==='failed'){out.innerHTML=`<div class="card bad">Research failed: ${esc(R.error)}</div>`;return}
+ out.innerHTML=`<div class="card">${R.question?`<p class="sm">Question: ${esc(R.question)}</p>`:''}<div class="md">${md(R.answer_md,R.sources)}</div>
+ ${R.sources&&R.sources.length?`<h3>Sources</h3><ol class="src">${R.sources.map(s=>`<li><a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.title)}</a></li>`).join('')}</ol>`:''}
+ <details><summary class="sm">Searches run (${(R.queries||[]).length}) and other pages consulted (${(R.consulted||[]).length})</summary>
+ <ul class="src">${(R.queries||[]).map(q=>`<li>${esc(q)}</li>`).join('')}</ul>${(R.consulted||[]).length?`<p class="sm">Consulted but not cited:</p><ul class="src">${R.consulted.map(s=>`<li><a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.title)}</a></li>`).join('')}</ul>`:''}</details>
+ <p style="margin-top:12px"><a href="${API}/research/${R.id}/download?format=docx"><button>Download DOCX</button></a> <a href="${API}/research/${R.id}/download?format=md"><button>Download Markdown</button></a>
+ <span class="sm">${R.tokens?` · ${R.tokens.in.toLocaleString()} in / ${R.tokens.out.toLocaleString()} out tokens`:''}</span></p></div>`}
+
+refresh().then(()=>{const first=Object.values(state.docs)[0];if(first)openDoc(first.id)});
+</script></body></html>
