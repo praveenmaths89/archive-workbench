@@ -3,3 +3,12 @@
 data/
 __pycache__/
 .pytest_cache/
+node_modules/
+.next/
+*.tsbuildinfo
+*.pdf
+.playwright/
+playwright-report/
+test-results/
+*.pyc
+.DS_Store
