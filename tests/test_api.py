@@ -7,20 +7,12 @@ import time
 
 import pymupdf
 import pytest
-from fastapi.testclient import TestClient
 from PIL import Image, ImageDraw, ImageFont
 from sqlalchemy import text
 
 from archive_workbench.db import engine, session
 from archive_workbench.queue import enqueue
 from archive_workbench.worker import drain
-
-
-@pytest.fixture
-def client(db):
-    from archive_workbench.main import app
-    with TestClient(app) as c:
-        yield c
 
 
 def _scan_pdf(text: str = "Kittur revenue minute") -> bytes:

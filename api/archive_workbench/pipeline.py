@@ -25,6 +25,7 @@ from .ocr import (
     ocr_vision,
 )
 from .queue import enqueue
+from .runtime import LLM_ENGINES, current, vision_model
 from .signals import image_signals, is_blank
 
 log = logging.getLogger("pipeline")
@@ -115,7 +116,9 @@ def _is_scan(src: Path, kind: str, number: int) -> bool:
         return bool(doc[number - 1].get_images())
 
 
-def read_page(src: Path, kind: str, number: int, engine: str, force_ocr: bool) -> tuple[list[dict], str, str | None]:
+def read_page(
+    src: Path, kind: str, number: int, engine: str, force_ocr: bool, on_progress=None,
+) -> tuple[list[dict], str, str | None]:
     img, text_layer = get_page(src, kind, number)
     height, width = img.shape[:2]
     signals = image_signals(img)
@@ -123,20 +126,20 @@ def read_page(src: Path, kind: str, number: int, engine: str, force_ocr: bool) -
         return [], "blank", None
     # Born-digital pages keep their text layer. Scans are read with the OCR engine
     # even when a previous text layer is present, so the boxes match the image.
-    if (not force_ocr and engine == "tesseract" and len(text_layer) >= 200
-            and not _is_scan(src, kind, number)):
+    if not force_ocr and len(text_layer) >= 200 and not _is_scan(src, kind, number):
         regions = text_layer_regions(src, number, width, height) if kind == "pdf" else []
         if not regions:
             regions = [{"type": "paragraph", "text": text_layer, "x": 0, "y": 0,
                         "w": width, "h": height, "confidence": 1.0, "rows": None}]
         return regions, "text_layer", None
+    pil = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+    if engine == "ppocr":
+        from .ocr_ppocr import ocr_ppocr
+        return ocr_ppocr(pil, on_progress=on_progress), "ppocr", None
     if engine == "tesseract":
-        pil = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
         return ocr_tesseract(pil), "tesseract", None
-    model = settings.model_for_tier(3) if engine == "claude" else settings.llm_model
-    if engine == "gemini" and not settings.llm_model.startswith("gemini/"):
-        model = "gemini/gemini-2.0-flash"
-    regions, language, _confidence, _routing = ocr_vision(img, model)
+    runtime = current()
+    regions, language, _confidence, _routing = ocr_vision(img, vision_model(engine, runtime))
     return regions, engine, language
 
 
@@ -149,15 +152,19 @@ def run_ocr(session: Session, document_id: uuid.UUID, payload: dict) -> dict:
     session.commit()
 
     src = Path(doc.source_path)
-    requested = (payload or {}).get("ocr_engine") or settings.ocr_engine
+    runtime = current()
+    requested = (payload or {}).get("ocr_engine") or doc.ocr_engine or runtime.ocr_engine or "tesseract"
+    if requested not in ("tesseract", "ppocr", "claude", "gemini"):
+        requested = "tesseract"
     force_ocr = bool((payload or {}).get("force_ocr"))
     redo = bool((payload or {}).get("redo"))
     page_spec = (payload or {}).get("pages")
     actual = requested
     note = None
-    if requested in ("claude", "gemini") and not settings.model_key:
+    if requested in LLM_ENGINES and not runtime.configured:
         actual = "tesseract"
-        note = "no API key; used Tesseract"
+        note = "No API key is saved, so Tesseract read this document."
+    doc.ocr_engine = requested
 
     pages = {p.number: p for p in session.scalars(select(Page).where(Page.document_id == doc.id))}
     for number in range(1, doc.page_count + 1):
@@ -194,7 +201,19 @@ def run_ocr(session: Session, document_id: uuid.UUID, payload: dict) -> dict:
             page.image_path = str(image_path)
             page.width = int(img.shape[1])
             page.height = int(img.shape[0])
-            regions, engine, language = read_page(src, doc.kind, number, actual, force_ocr)
+
+            def on_progress(message: str) -> None:
+                doc.progress = message
+                session.commit()
+
+            try:
+                regions, engine, language = read_page(src, doc.kind, number, actual, force_ocr, on_progress)
+            except Exception:
+                if actual != "ppocr":
+                    raise
+                log.exception("PP-OCR failed; using Tesseract")
+                note = "PP-OCR could not run, so Tesseract read this document."
+                regions, engine, language = read_page(src, doc.kind, number, "tesseract", force_ocr)
             _replace_regions(session, page, regions)
             _apply_text(page, regions, engine, language)
             if language and not doc.language:
@@ -221,6 +240,7 @@ def run_ocr(session: Session, document_id: uuid.UUID, payload: dict) -> dict:
         doc.error = fatal
     elif doc.stop_requested:
         doc.status = "stopped"
+    doc.progress = note
     session.commit()
     return {"requested_engine": requested, "engine": actual, "note": note, "failed_pages": failed, "fatal": fatal}
 

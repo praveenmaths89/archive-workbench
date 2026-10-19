@@ -15,6 +15,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
     func,
 )
 from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR, UUID
@@ -36,6 +37,9 @@ class Document(Base):
     page_count: Mapped[int] = mapped_column(Integer, default=0)
     selected_pages: Mapped[int] = mapped_column(Integer, default=0)
     language: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    collection: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    ocr_engine: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    progress: Mapped[str | None] = mapped_column(Text, nullable=True)
     explanation: Mapped[str | None] = mapped_column(Text, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     source_path: Mapped[str] = mapped_column(Text, default="")
@@ -160,6 +164,37 @@ class LibraryCache(Base):
     query: Mapped[str] = mapped_column(String(1000), primary_key=True)
     payload: Mapped[dict] = mapped_column(JSONB)
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class AppSetting(Base):
+    __tablename__ = "app_settings"
+
+    key: Mapped[str] = mapped_column(String(80), primary_key=True)
+    value: Mapped[str] = mapped_column(Text, default="")
+
+
+class AccessEntry(Base):
+    __tablename__ = "access_entries"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    kind: Mapped[str] = mapped_column(String(20))
+    value: Mapped[str] = mapped_column(String(320))
+    is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
+    source: Mapped[str] = mapped_column(String(20), default="local")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (UniqueConstraint("kind", "value", name="access_kind_value"),)
+
+
+class UserSession(Base):
+    __tablename__ = "sessions"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    email: Mapped[str] = mapped_column(String(320))
+    is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class RateHit(Base):

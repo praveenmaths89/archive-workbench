@@ -13,6 +13,7 @@ os.environ["DATA_DIR"] = "/tmp/aw-test-data"
 Path("/tmp/aw-test-data").mkdir(parents=True, exist_ok=True)
 
 import pytest
+from fastapi.testclient import TestClient
 from sqlalchemy import text
 
 from archive_workbench.config import settings
@@ -25,6 +26,7 @@ settings.ocr_engine = "tesseract"
 settings.llm_api_key = ""
 settings.anthropic_api_key = ""
 settings.app_password = ""
+settings.auth_disabled = True
 
 
 def database_up() -> bool:
@@ -48,7 +50,15 @@ def migrated():
 def db(migrated):
     with engine.begin() as conn:
         conn.execute(text(
-            "TRUNCATE rate_hits, library_cache, messages, notes, jobs, chunks, regions, pages, documents "
+            "TRUNCATE rate_hits, library_cache, messages, notes, jobs, chunks, regions, pages, documents, "
+            "sessions, access_entries, app_settings "
             "RESTART IDENTITY CASCADE"
         ))
     yield
+
+
+@pytest.fixture
+def client(db):
+    from archive_workbench.main import app
+    with TestClient(app) as test_client:
+        yield test_client

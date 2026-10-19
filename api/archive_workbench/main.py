@@ -2,32 +2,37 @@
 from __future__ import annotations
 
 import json
-import secrets
+import logging
 import shutil
+import sys
 import uuid
 from contextlib import asynccontextmanager
+from datetime import date
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from fastapi.responses import FileResponse, RedirectResponse, Response
 from pydantic import BaseModel
 from sqlalchemy import delete, select, text
 from sqlalchemy.orm import Session
 
-from . import export
+from . import auth, export
 from .config import settings
 from .connectors import DEFAULT_SOURCES
 from .connectors.base import search_libraries
 from .db import engine, session as new_session
 from .ingest import IngestError, detect_kind, get_page, page_count, to_jpeg
 from .migrate import run_migrations
-from .models import Document, Job, Message, Note, Page, Region
+from .models import AccessEntry, AppSetting, Document, Job, Message, Note, Page, Region
+from .ocr_ppocr import model_status
 from .pipeline import build_ir, document_dir, page_image_path
 from .queue import enqueue
 from .ranges import parse_pages
-from .search import hybrid_search
+from .runtime import ENGINES, current, load_runtime, mask_secret, put_setting, use_runtime
+from .search import workspace_search
+
+log = logging.getLogger("api")
 
 API = "/api"
 FORMATS = {
@@ -40,14 +45,13 @@ FORMATS = {
     "tei": "application/tei+xml; charset=utf-8",
 }
 SAFE_EXT = {"pdf", "png", "jpg", "jpeg", "tif", "tiff", "webp"}
-basic = HTTPBasic(auto_error=False)
-
-
-def require_login(creds: HTTPBasicCredentials | None = Depends(basic)):
-    if not settings.app_password:
-        return
-    if not creds or not secrets.compare_digest(creds.password, settings.app_password):
-        raise HTTPException(401, "login required", headers={"WWW-Authenticate": "Basic"})
+PUBLIC_PATHS = {
+    "/api/health",
+    "/api/auth/login",
+    "/api/auth/callback",
+    "/api/auth/logout",
+    "/api/auth/me",
+}
 
 
 def get_db():
@@ -58,14 +62,35 @@ def get_db():
         db.close()
 
 
+def require_user(request: Request, db: Session = Depends(get_db)):
+    if request.url.path in PUBLIC_PATHS:
+        return auth.read_user(request, db)
+    user = auth.read_user(request, db)
+    if user is None:
+        raise HTTPException(401, "Sign in to continue.")
+    return user
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     run_migrations()
+    if settings.auth_disabled:
+        message = (
+            "AUTH_DISABLED is set. Google sign-in is off. "
+            "Anyone who can open this computer can use the workbench."
+        )
+        print(message, file=sys.stderr, flush=True)
+        logging.getLogger("uvicorn.error").warning(message)
+    db = new_session()
+    try:
+        auth.seed_access(db)
+    finally:
+        db.close()
     yield
 
 
-app = FastAPI(title="Archive Workbench", dependencies=[Depends(require_login)], lifespan=lifespan)
+app = FastAPI(title="Archive Workbench", dependencies=[Depends(require_user)], lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
@@ -127,6 +152,9 @@ def _document_json(db: Session, doc: Document, detail: bool = False) -> dict:
         "page_count": doc.page_count,
         "selected_pages": doc.selected_pages,
         "language": doc.language,
+        "collection": doc.collection,
+        "ocr_engine": doc.ocr_engine,
+        "progress": doc.progress,
         "explanation": doc.explanation,
         "error": doc.error,
         "created_at": doc.created_at.isoformat() if doc.created_at else None,
@@ -165,11 +193,18 @@ def health():
             conn.execute(text("SELECT 1"))
     except Exception:
         database = False
+    runtime = current()
+    try:
+        with new_session() as db:
+            runtime = load_runtime(db)
+    except Exception:
+        pass
     return {
         "database": database,
-        "ocr_engine": settings.ocr_engine,
-        "llm": bool(settings.model_key),
+        "ocr_engine": runtime.ocr_engine,
+        "llm": runtime.configured,
         "embedding": settings.embedding_provider,
+        "auth_disabled": settings.auth_disabled,
     }
 
 
@@ -228,6 +263,11 @@ async def upload_documents(
         doc.source_path = str(src)
         doc.page_count = total
         doc.selected_pages = len(chosen)
+        engine = opts.get("ocr_engine")
+        doc.ocr_engine = engine if engine in ENGINES else None
+        doc.collection = (opts.get("collection") or "").strip() or None
+        if opts.get("language"):
+            doc.language = str(opts.get("language"))[:40]
         for number in range(1, total + 1):
             status = "pending" if number in chosen else "skipped"
             db.add(Page(document_id=doc.id, number=number, status=status))
@@ -523,18 +563,19 @@ def download(document_id: uuid.UUID, format: str = "docx", db: Session = Depends
 
 
 @app.get(f"{API}/search")
-def search(q: str, document_id: uuid.UUID | None = None, db: Session = Depends(get_db)):
-    chunks = hybrid_search(db, q, document_id, k=8)
-    return [
-        {
-            "chunk_id": str(chunk.id),
-            "document_id": str(chunk.document_id),
-            "page": chunk.page_number,
-            "region_id": str(chunk.region_id) if chunk.region_id else None,
-            "text": chunk.text,
-        }
-        for chunk in chunks
-    ]
+def search(
+    q: str,
+    document_id: uuid.UUID | None = None,
+    collection: str | None = None,
+    language: str | None = None,
+    engine: str | None = None,
+    uploaded_from: date | None = None,
+    uploaded_to: date | None = None,
+    db: Session = Depends(get_db),
+):
+    return workspace_search(
+        db, q, document_id, collection, language, engine, uploaded_from, uploaded_to,
+    )
 
 
 @app.get(f"{API}/library/search")
@@ -560,3 +601,230 @@ def get_job(job_id: uuid.UUID, db: Session = Depends(get_db)):
         "result": job.result,
         "attempts": job.attempts,
     }
+
+
+class SettingsIn(BaseModel):
+    provider: str | None = None
+    model: str | None = None
+    api_base: str | None = None
+    api_key: str | None = None
+    ocr_engine: str | None = None
+
+
+class AccessIn(BaseModel):
+    kind: str
+    value: str
+    is_admin: bool = False
+
+
+class DocPatch(BaseModel):
+    title: str | None = None
+    collection: str | None = None
+    language: str | None = None
+
+
+def _settings_view(db: Session, user: dict | None) -> dict:
+    runtime = load_runtime(db)
+    saved = db.get(AppSetting, "llm_api_key")
+    saved_key = (saved.value if saved else "") or ""
+    return {
+        "provider": runtime.provider,
+        "model": runtime.model,
+        "api_base": runtime.api_base,
+        "key_set": runtime.configured,
+        "key_mask": mask_secret(saved_key) if runtime.key_source == "saved" else "",
+        "key_source": runtime.key_source,
+        "ocr_engine": runtime.ocr_engine,
+        "engines": [
+            {"id": "tesseract", "needs_key": False},
+            {"id": "ppocr", "needs_key": False},
+            {"id": "claude", "needs_key": True},
+            {"id": "gemini", "needs_key": True},
+        ],
+        "llm": runtime.configured,
+        "is_admin": bool(user and user.get("is_admin")),
+        "auth_disabled": settings.auth_disabled,
+    }
+
+
+@app.get(f"{API}/auth/login")
+def auth_login():
+    base = settings.app_base_url.rstrip("/")
+    if settings.auth_disabled:
+        return RedirectResponse(base + "/")
+    if not settings.google_client_id or not settings.google_client_secret:
+        return RedirectResponse(base + "/login?error=config")
+    url, state = auth.login_redirect()
+    response = RedirectResponse(url)
+    response.set_cookie(
+        auth.STATE_COOKIE,
+        auth.sign_state(state),
+        httponly=True,
+        samesite="lax",
+        secure=auth.cookie_secure(),
+        max_age=600,
+        path="/",
+    )
+    return response
+
+
+@app.get(f"{API}/auth/callback")
+def auth_callback(
+    request: Request,
+    code: str = "",
+    state: str = "",
+    error: str = "",
+    db: Session = Depends(get_db),
+):
+    from urllib.parse import quote
+
+    base = settings.app_base_url.rstrip("/")
+    if error or not code:
+        return RedirectResponse(f"{base}/access-denied?reason=cancelled")
+    if not auth.state_matches(request.cookies.get(auth.STATE_COOKIE), state):
+        return RedirectResponse(f"{base}/access-denied?reason=state")
+    try:
+        profile = auth.exchange_code(code)
+    except Exception:
+        log.exception("Google sign-in failed")
+        return RedirectResponse(f"{base}/access-denied?reason=google")
+    allowed, is_admin = auth.email_allowed(db, profile["email"])
+    target = f"{base}/" if allowed else f"{base}/access-denied?email={quote(profile['email'])}"
+    response = RedirectResponse(target)
+    response.delete_cookie(auth.STATE_COOKIE, path="/")
+    if not allowed:
+        return response
+    auth.set_session_cookie(response, auth.open_session(db, profile["email"], is_admin))
+    return response
+
+
+@app.post(f"{API}/auth/logout")
+def auth_logout(request: Request, db: Session = Depends(get_db)):
+    auth.drop_session(db, request.cookies.get(auth.COOKIE))
+    response = Response(content='{"ok":true}', media_type="application/json")
+    auth.clear_session_cookie(response)
+    return response
+
+
+@app.get(f"{API}/auth/me")
+def auth_me(request: Request, db: Session = Depends(get_db)):
+    user = auth.read_user(request, db)
+    if user is None:
+        return {"authenticated": False, "auth_disabled": False, "email": None, "is_admin": False}
+    return user
+
+
+@app.get(f"{API}/settings")
+def get_settings(user: dict = Depends(require_user), db: Session = Depends(get_db)):
+    return _settings_view(db, user)
+
+
+@app.put(f"{API}/settings")
+def save_settings(body: SettingsIn, user: dict = Depends(require_user), db: Session = Depends(get_db)):
+    auth.require_admin(user)
+    if body.provider is not None:
+        put_setting(db, "llm_provider", body.provider.strip()[:40])
+    if body.model is not None:
+        put_setting(db, "llm_model", body.model.strip()[:200])
+    if body.api_base is not None:
+        put_setting(db, "llm_api_base", body.api_base.strip()[:300])
+    if body.api_key and body.api_key.strip():
+        put_setting(db, "llm_api_key", body.api_key.strip())
+    if body.ocr_engine:
+        if body.ocr_engine not in ENGINES:
+            raise HTTPException(400, "Unknown OCR engine.")
+        put_setting(db, "ocr_engine", body.ocr_engine)
+    db.commit()
+    return _settings_view(db, user)
+
+
+@app.delete(f"{API}/settings/key")
+def clear_settings_key(user: dict = Depends(require_user), db: Session = Depends(get_db)):
+    auth.require_admin(user)
+    row = db.get(AppSetting, "llm_api_key")
+    if row is not None:
+        db.delete(row)
+        db.commit()
+    return _settings_view(db, user)
+
+
+@app.post(f"{API}/settings/test")
+def test_settings(body: SettingsIn, user: dict = Depends(require_user), db: Session = Depends(get_db)):
+    from .llm import complete
+    from .runtime import Runtime
+
+    auth.require_admin(user)
+    runtime = load_runtime(db)
+    key = (body.api_key or "").strip() or runtime.api_key
+    model = (body.model or "").strip() or runtime.model
+    base = body.api_base if body.api_base is not None else runtime.api_base
+    if not key:
+        raise HTTPException(400, "Paste a key, or save one, before testing.")
+    trial = Runtime(key, model, base or "", body.provider or runtime.provider, runtime.ocr_engine, "saved")
+    try:
+        with use_runtime(trial):
+            reply = complete("Reply with the single word pong.", "ping")
+    except Exception as exc:
+        message = str(exc).replace(key, "••••")[:300] or "The key was rejected."
+        return {"ok": False, "detail": message}
+    return {"ok": True, "detail": (reply or "pong").strip()[:80]}
+
+
+@app.get(f"{API}/access")
+def list_access(user: dict = Depends(require_user), db: Session = Depends(get_db)):
+    auth.require_admin(user)
+    rows = db.scalars(select(AccessEntry).order_by(AccessEntry.kind, AccessEntry.value)).all()
+    return [
+        {"id": str(row.id), "kind": row.kind, "value": row.value, "is_admin": row.is_admin, "source": row.source}
+        for row in rows
+    ]
+
+
+@app.post(f"{API}/access")
+def add_access(body: AccessIn, user: dict = Depends(require_user), db: Session = Depends(get_db)):
+    auth.require_admin(user)
+    if body.kind not in ("email", "domain"):
+        raise HTTPException(400, "Kind must be email or domain.")
+    value = body.value.strip().lower().lstrip("@")
+    if body.kind == "email" and "@" not in value:
+        raise HTTPException(400, "That does not look like an email address.")
+    if not value:
+        raise HTTPException(400, "Enter an email or a domain.")
+    existing = db.scalar(select(AccessEntry).where(AccessEntry.kind == body.kind, AccessEntry.value == value))
+    if existing is None:
+        db.add(AccessEntry(kind=body.kind, value=value, is_admin=body.is_admin, source="local"))
+    elif body.is_admin:
+        existing.is_admin = True
+    db.commit()
+    return list_access(user, db)
+
+
+@app.delete(f"{API}/access/{{entry_id}}")
+def remove_access(entry_id: uuid.UUID, user: dict = Depends(require_user), db: Session = Depends(get_db)):
+    auth.require_admin(user)
+    row = db.get(AccessEntry, entry_id)
+    if row is None:
+        raise HTTPException(404, "That entry is not on the list.")
+    if row.is_admin and auth.admin_count(db) <= 1:
+        raise HTTPException(400, "The last admin cannot be removed.")
+    db.delete(row)
+    db.commit()
+    return {"deleted": str(entry_id)}
+
+
+@app.get(f"{API}/ocr/models")
+def ocr_models():
+    return model_status()
+
+
+@app.patch(f"{API}/documents/{{document_id}}")
+def patch_document(document_id: uuid.UUID, body: DocPatch, db: Session = Depends(get_db)):
+    doc = _doc_or_404(db, document_id)
+    if body.title is not None:
+        doc.title = body.title.strip()[:500] or doc.filename
+    if body.collection is not None:
+        doc.collection = body.collection.strip()[:200] or None
+    if body.language is not None:
+        doc.language = body.language.strip()[:40] or None
+    db.commit()
+    return _document_json(db, doc)

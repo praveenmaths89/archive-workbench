@@ -19,9 +19,11 @@ type Props = {
   activeId: string | null;
   showBoxes: boolean;
   onSelect: (id: string) => void;
+  labels?: { zoomIn: string; zoomOut: string; fit: string; empty: string };
+  find?: string;
 };
 
-export default function Viewer({ imageUrl, regions, activeId, showBoxes, onSelect }: Props) {
+export default function Viewer({ imageUrl, regions, activeId, showBoxes, onSelect, labels, find }: Props) {
   const host = useRef<HTMLDivElement>(null);
   const viewerRef = useRef<ReturnType<typeof OpenSeadragon> | null>(null);
   const buttons = useRef<Record<string, HTMLButtonElement | null>>({});
@@ -117,12 +119,12 @@ export default function Viewer({ imageUrl, regions, activeId, showBoxes, onSelec
   return (
     <div>
       <div className="toolbar">
-        <button type="button" className="ghost" onClick={() => zoom(1.25)}>Zoom in</button>
-        <button type="button" className="ghost" onClick={() => zoom(0.8)}>Zoom out</button>
-        <button type="button" className="ghost" onClick={() => viewerRef.current?.viewport.goHome(true)}>Fit page</button>
+        <button type="button" className="ghost" onClick={() => zoom(1.25)}>{labels?.zoomIn || "Zoom in"}</button>
+        <button type="button" className="ghost" onClick={() => zoom(0.8)}>{labels?.zoomOut || "Zoom out"}</button>
+        <button type="button" className="ghost" onClick={() => viewerRef.current?.viewport.goHome(true)}>{labels?.fit || "Fit page"}</button>
       </div>
       <div className="viewer-frame">
-        {imageUrl ? <div ref={host} className="osd" /> : <p className="quiet" style={{ color: "#f3efe6", padding: 16 }}>No page image yet.</p>}
+        {imageUrl ? <div ref={host} className="osd" /> : <p className="quiet" style={{ color: "#f4efe6", padding: 16 }}>{labels?.empty || "No page image yet."}</p>}
         {showBoxes && imageUrl && (
           <div className="overlay">
             {regions.map((region) => (
@@ -130,7 +132,7 @@ export default function Viewer({ imageUrl, regions, activeId, showBoxes, onSelec
                 key={region.id}
                 type="button"
                 ref={(node) => { buttons.current[region.id] = node; }}
-                className={`region-box${region.id === activeId ? " active" : ""}${region.confidence > 0 && region.confidence < 0.6 ? " low" : ""}`}
+                className={`region-box${region.id === activeId ? " active" : ""}${region.confidence > 0 && region.confidence < 0.6 ? " low" : ""}${find && region.text.toLowerCase().includes(find.toLowerCase()) ? " hit" : ""}`}
                 onClick={() => onSelect(region.id)}
               >
                 <span className="sr">{region.text || "Empty region"}</span>

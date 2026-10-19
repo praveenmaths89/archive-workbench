@@ -15,6 +15,7 @@ from .models import Document, Job, Message
 from .ocr import FatalProviderError
 from .pipeline import queue_followups, run_embed, run_explain, run_ocr, run_translate
 from .queue import claim, fail, finish, reclaim_stale
+from .runtime import load_runtime, use_runtime
 
 log = logging.getLogger("worker")
 
@@ -75,7 +76,8 @@ def process_one(worker_id: str = "worker") -> bool:
             return False
         job = db.get(Job, jid)
         try:
-            result = _handle(db, job)
+            with use_runtime(load_runtime(db)):
+                result = _handle(db, job)
             job = db.get(Job, jid)
             finish(db, job, result)
         except Exception as exc:

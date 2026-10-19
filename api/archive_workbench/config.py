@@ -34,6 +34,15 @@ class Settings(BaseSettings):
     dpla_api_key: str = ""
     app_password: str = ""
 
+    auth_disabled: bool = True
+    google_client_id: str = ""
+    google_client_secret: str = ""
+    auth_secret: str = ""
+    app_base_url: str = "http://localhost:3000"
+    allowed_emails: str = ""
+    allowed_domains: str = ""
+    admin_emails: str = "praveenmaths89@gmail.com"
+
     historical_bias: bool = True
     escalation_threshold: float = 0.85
     render_dpi: int = 200

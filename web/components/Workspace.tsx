@@ -1,8 +1,10 @@
 "use client";
 
 import dynamic from "next/dynamic";
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, PointerEvent as ReactPointerEvent, useEffect, useMemo, useRef, useState } from "react";
+import { LOCALES, LOCALE_NAMES, useI18n, type Locale } from "@/lib/i18n";
 import type { Region } from "./Viewer";
+import SettingsPanel, { type SettingsView } from "./SettingsPanel";
 
 const Viewer = dynamic(() => import("./Viewer"), { ssr: false });
 
@@ -13,6 +15,10 @@ type DocSummary = {
   page_count: number;
   error?: string | null;
   explanation?: string | null;
+  collection?: string | null;
+  language?: string | null;
+  progress?: string | null;
+  ocr_engine?: string | null;
 };
 
 type PageInfo = {
@@ -28,32 +34,32 @@ type PageInfo = {
 };
 
 type RegionInfo = Region & { page_id: string; page_number: number; idx: number; type: string };
-
 type Note = { id: string; body: string };
-type Citation = {
-  n: number;
-  kind: string;
-  page?: number;
-  region_id?: string | null;
-  url?: string;
-  title?: string;
-};
+type Citation = { n: number; kind: string; page?: number; region_id?: string | null; url?: string; title?: string };
 type ChatMessage = { id: string; role: string; content: string; citations: Citation[] };
 type Detail = DocSummary & { pages: PageInfo[]; regions: RegionInfo[]; notes: Note[]; jobs: { id: string; kind: string; status: string }[] };
-
 type Hit = { title: string; url: string; creators: string[]; date?: string | null; description: string; source: string };
 type SourceBlock = { source: string; status: string; error?: string | null; hits: Hit[] };
+type SearchHit = {
+  kind: string;
+  document_id: string;
+  filename: string;
+  title: string;
+  page: number | null;
+  region_id: string | null;
+  snippet: string;
+};
 
-const STATUS: Record<string, string> = {
-  queued: "Queued",
-  processing: "Reading",
-  done: "Done",
-  done_with_errors: "Done, with errors",
-  failed: "Failed",
-  rejected: "Rejected",
-  stopped: "Stopped",
-  pending: "Waiting",
-  skipped: "Not read",
+const STATUS_KEY: Record<string, string> = {
+  queued: "statusQueued",
+  processing: "statusReading",
+  done: "statusDone",
+  done_with_errors: "statusDoneErrors",
+  failed: "statusFailed",
+  rejected: "statusRejected",
+  stopped: "statusStopped",
+  pending: "statusWaiting",
+  skipped: "statusSkipped",
 };
 
 const SOURCES = [
@@ -62,16 +68,19 @@ const SOURCES = [
   ["wikidata", "Wikidata"],
   ["openalex", "OpenAlex"],
   ["gallica", "Gallica"],
-  ["europeana", "Europeana (needs a key)"],
-  ["dpla", "DPLA (needs a key)"],
+  ["europeana", "Europeana"],
+  ["dpla", "DPLA"],
 ] as const;
 
-function statusLabel(status: string) {
-  return STATUS[status] || status;
+const DOC_LANGS = ["en", "hi", "kn", "mr", "ta", "te", "bn"];
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
 }
 
 export default function Workspace() {
-  const [view, setView] = useState<"workspace" | "library">("workspace");
+  const { t, locale, setLocale, theme, setTheme } = useI18n();
+  const [view, setView] = useState<"workspace" | "library" | "settings">("workspace");
   const [docs, setDocs] = useState<DocSummary[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [detail, setDetail] = useState<Detail | null>(null);
@@ -85,14 +94,38 @@ export default function Workspace() {
   const [language, setLanguage] = useState("hi");
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
+  const [apiDown, setApiDown] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const [query, setQuery] = useState("Kittur");
   const [picked, setPicked] = useState<string[]>(["internet_archive", "loc", "wikidata", "openalex", "gallica"]);
   const [library, setLibrary] = useState<SourceBlock[] | null>(null);
+  const [settings, setSettings] = useState<SettingsView | null>(null);
+  const [uploadEngine, setUploadEngine] = useState("tesseract");
+  const [collection, setCollection] = useState("");
+  const [docLanguage, setDocLanguage] = useState("");
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchHits, setSearchHits] = useState<SearchHit[] | null>(null);
+  const [filterCollection, setFilterCollection] = useState("");
+  const [filterLanguage, setFilterLanguage] = useState("");
+  const [filterEngine, setFilterEngine] = useState("");
+  const [filterWhen, setFilterWhen] = useState("");
+  const [findOpen, setFindOpen] = useState(false);
+  const [findQuery, setFindQuery] = useState("");
+  const [hideLeft, setHideLeft] = useState(false);
+  const [hideRight, setHideRight] = useState(false);
+  const [left, setLeft] = useState(280);
+  const [right, setRight] = useState(360);
+  const [panesReady, setPanesReady] = useState(false);
+  const [showOnboarding, setShowOnboarding] = useState(false);
+  const searchOpenRef = useRef(false);
+  const viewRef = useRef(view);
+  searchOpenRef.current = searchOpen;
+  viewRef.current = view;
 
   async function refreshList() {
     const response = await fetch("/api/documents");
-    if (!response.ok) throw new Error("Could not load documents");
+    if (!response.ok) throw new Error("documents");
     const rows = (await response.json()) as DocSummary[];
     setDocs(rows);
     return rows;
@@ -110,6 +143,34 @@ export default function Workspace() {
   }
 
   useEffect(() => {
+    const storedLeft = Number(localStorage.getItem("aw-pane-left"));
+    const storedRight = Number(localStorage.getItem("aw-pane-right"));
+    if (storedLeft >= 200 && storedLeft <= 520) setLeft(storedLeft);
+    if (storedRight >= 260 && storedRight <= 560) setRight(storedRight);
+    setHideLeft(localStorage.getItem("aw-hide-left") === "1");
+    setHideRight(localStorage.getItem("aw-hide-right") === "1");
+    setPanesReady(true);
+    if (!localStorage.getItem("aw-onboarded")) setShowOnboarding(true);
+    fetch("/api/settings").then(async (response) => {
+      if (response.ok) setSettings(await response.json());
+    }).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (!panesReady) return;
+    localStorage.setItem("aw-pane-left", String(left));
+    localStorage.setItem("aw-pane-right", String(right));
+    localStorage.setItem("aw-hide-left", hideLeft ? "1" : "0");
+    localStorage.setItem("aw-hide-right", hideRight ? "1" : "0");
+  }, [left, right, hideLeft, hideRight, panesReady]);
+
+  useEffect(() => {
+    if (settings && !settings.llm && (uploadEngine === "claude" || uploadEngine === "gemini")) {
+      setUploadEngine(settings.ocr_engine === "ppocr" ? "ppocr" : "tesseract");
+    }
+  }, [settings, uploadEngine]);
+
+  useEffect(() => {
     let stop = false;
     async function tick() {
       try {
@@ -118,9 +179,9 @@ export default function Workspace() {
         const id = selected && rows.some((row) => row.id === selected) ? selected : rows[0]?.id;
         if (id && id !== selected) setSelected(id);
         if (id) await refreshDetail(id);
-        if (!stop) setError("");
+        if (!stop) setApiDown(false);
       } catch {
-        if (!stop) setError("The API is not reachable. If you just started the stack, wait a moment and reload.");
+        if (!stop) setApiDown(true);
       }
     }
     tick();
@@ -128,36 +189,103 @@ export default function Workspace() {
     return () => { stop = true; clearInterval(timer); };
   }, [selected]);
 
+  useEffect(() => {
+    if (!detail) return;
+    setCollection(detail.collection || "");
+    setDocLanguage(detail.language || "");
+  }, [detail?.id]);
+
+  useEffect(() => {
+    function onKey(event: KeyboardEvent) {
+      const meta = event.metaKey || event.ctrlKey;
+      if (meta && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        setSearchOpen(true);
+      } else if (meta && event.key.toLowerCase() === "f" && viewRef.current === "workspace" && !searchOpenRef.current) {
+        event.preventDefault();
+        setFindOpen(true);
+      } else if (event.key === "Escape") {
+        setSearchOpen(false);
+        setFindOpen(false);
+        setShowOnboarding(false);
+        localStorage.setItem("aw-onboarded", "1");
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  useEffect(() => {
+    if (!searchOpen || searchQuery.trim().length < 2) {
+      if (!searchQuery.trim()) setSearchHits(null);
+      return;
+    }
+    const handle = setTimeout(async () => {
+      const params = new URLSearchParams({ q: searchQuery.trim() });
+      if (filterCollection.trim()) params.set("collection", filterCollection.trim());
+      if (filterLanguage.trim()) params.set("language", filterLanguage.trim());
+      if (filterEngine) params.set("engine", filterEngine);
+      if (filterWhen) {
+        const from = new Date();
+        from.setDate(from.getDate() - (filterWhen === "week" ? 7 : 30));
+        params.set("uploaded_from", from.toISOString().slice(0, 10));
+      }
+      const response = await fetch(`/api/search?${params}`);
+      if (!response.ok) {
+        setError(t("errorSearch"));
+        return;
+      }
+      setSearchHits(await response.json());
+    }, 250);
+    return () => clearTimeout(handle);
+  }, [searchOpen, searchQuery, filterCollection, filterLanguage, filterEngine, filterWhen, t]);
+
   const page = detail?.pages?.find((item) => item.number === pageNumber) || detail?.pages?.[0];
   const regions = useMemo(
     () => (detail?.regions || []).filter((region) => region.page_number === (page?.number || pageNumber)).sort((a, b) => a.idx - b.idx),
     [detail, page, pageNumber],
   );
+  const llm = Boolean(settings?.llm);
+  const imageUrl = selected && page ? `/api/documents/${selected}/pages/${page.number}/image` : null;
+
+  function statusLabel(status: string) {
+    return t(STATUS_KEY[status] || status);
+  }
 
   async function upload(files: File[]) {
     if (!files.length) return;
-    setBusy("Uploading");
+    setBusy("busyUpload");
+    setError("");
     const body = new FormData();
     for (const file of files) body.append("files", file);
-    const options: { pages?: string } = {};
+    const options: { pages?: string; ocr_engine?: string; collection?: string; language?: string } = {
+      ocr_engine: uploadEngine,
+    };
     if (pageRange.trim()) options.pages = pageRange.trim();
+    if (collection.trim()) options.collection = collection.trim();
+    if (docLanguage.trim()) options.language = docLanguage.trim();
     body.append("options", JSON.stringify(options));
     const response = await fetch("/api/documents", { method: "POST", body });
     setBusy("");
     if (!response.ok) {
-      setError("Upload failed.");
+      setError(t("errorUpload"));
       return;
     }
     const payload = await response.json();
     const queued = (payload.documents || []).find((row: { status: string; id: string }) => row.status === "queued");
-    if (queued) setSelected(queued.id);
+    if (queued) {
+      setSelected(queued.id);
+      setPageNumber(1);
+      setActiveRegion(null);
+    }
     await refreshList();
   }
 
   async function ask(event: FormEvent) {
     event.preventDefault();
     if (!selected || !question.trim()) return;
-    setBusy("Asking");
+    setBusy("busyAsk");
+    setError("");
     const response = await fetch(`/api/documents/${selected}/ask`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -165,11 +293,11 @@ export default function Workspace() {
     });
     setBusy("");
     if (response.status === 409) {
-      setError("Wait until reading finishes, then ask again.");
+      setError(t("errorWait"));
       return;
     }
     if (!response.ok) {
-      setError("Could not ask that question.");
+      setError(t("errorAsk"));
       return;
     }
     setQuestion("");
@@ -196,7 +324,7 @@ export default function Workspace() {
 
   async function translate() {
     if (!selected) return;
-    setBusy("Translating");
+    setBusy("busyTranslate");
     await fetch(`/api/documents/${selected}/translate`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -213,97 +341,221 @@ export default function Workspace() {
     await refreshList();
   }
 
+  async function saveDocMeta() {
+    if (!selected) return;
+    await fetch(`/api/documents/${selected}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ collection, language: docLanguage }),
+    });
+  }
+
   function onCite(citation: Citation) {
     if (citation.kind !== "document") return;
     if (citation.page) setPageNumber(citation.page);
     if (citation.region_id) setActiveRegion(citation.region_id);
   }
 
+  function openHit(hit: SearchHit) {
+    setView("workspace");
+    setSelected(hit.document_id);
+    setPageNumber(hit.page || 1);
+    setActiveRegion(hit.region_id);
+    setFindQuery(searchQuery.trim());
+    setFindOpen(Boolean(searchQuery.trim()));
+    setSearchOpen(false);
+  }
+
   async function runLibrary(event: FormEvent) {
     event.preventDefault();
-    setBusy("Searching");
+    setBusy("busySearch");
+    setError("");
     const response = await fetch(`/api/library/search?q=${encodeURIComponent(query)}&sources=${picked.join(",")}`);
     setBusy("");
     if (!response.ok) {
-      setError("Library search failed.");
+      setError(t("errorLibrary"));
       return;
     }
     const payload = await response.json();
     setLibrary(payload.sources);
   }
 
-  const imageUrl = selected && page ? `/api/documents/${selected}/pages/${page.number}/image` : null;
+  function beginResize(which: "left" | "right", event: ReactPointerEvent) {
+    event.preventDefault();
+    const startX = event.clientX;
+    const start = which === "left" ? left : right;
+    function move(ev: PointerEvent) {
+      const dx = ev.clientX - startX;
+      if (which === "left") setLeft(clamp(start + dx, 200, 520));
+      else setRight(clamp(start - dx, 260, 560));
+    }
+    function up() {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+    }
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  }
+
+  function dismissOnboarding() {
+    localStorage.setItem("aw-onboarded", "1");
+    setShowOnboarding(false);
+  }
+
+  const kindLabel = (kind: string) => {
+    if (kind === "translation") return t("kindTranslation");
+    if (kind === "note") return t("kindNote");
+    return t("kindTranscription");
+  };
 
   return (
     <div className="app">
-      <a className="skip" href="#viewer">Skip to page</a>
+      <a className="skip" href="#viewer">{t("skipToPage")}</a>
       <header className="top">
         <h1>Archive Workbench</h1>
+        <button type="button" className="search-launch" onClick={() => setSearchOpen(true)}>
+          <span>{t("searchYours")}</span>
+          <kbd aria-hidden="true">Ctrl/Cmd K</kbd>
+        </button>
         <nav className="views" aria-label="Views">
-          <button type="button" aria-current={view === "workspace" ? "page" : undefined} onClick={() => setView("workspace")}>Workspace</button>
-          <button type="button" aria-current={view === "library" ? "page" : undefined} onClick={() => setView("library")}>Library search</button>
+          <button type="button" aria-current={view === "workspace" ? "page" : undefined} onClick={() => setView("workspace")}>{t("workspace")}</button>
+          <button type="button" aria-current={view === "library" ? "page" : undefined} onClick={() => setView("library")}>{t("libraries")}</button>
+          <button type="button" aria-current={view === "settings" ? "page" : undefined} onClick={() => setView("settings")}>{t("settings")}</button>
         </nav>
-        {busy && <span className="quiet">{busy}</span>}
+        <div className="grow">
+          <label className="lang">
+            <span className="sr">{t("interfaceLanguage")}</span>
+            <select aria-label={t("interfaceLanguage")} value={locale} onChange={(event) => setLocale(event.target.value as Locale)}>
+              {LOCALES.map((code) => <option key={code} value={code}>{LOCALE_NAMES[code]}</option>)}
+            </select>
+          </label>
+          <button
+            type="button"
+            className="theme-toggle"
+            aria-label={theme === "dark" ? t("lightMode") : t("darkMode")}
+            onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
+          >
+            {theme === "dark" ? t("lightMode") : t("darkMode")}
+          </button>
+          {busy && <span className="quiet" role="status">{t(busy)}</span>}
+        </div>
       </header>
-      {error && <p className="error" role="alert" style={{ margin: "8px 18px" }}>{error}</p>}
+      {(apiDown || error) && <p className="error banner" role="alert">{apiDown ? t("errorApi") : error}</p>}
 
       {view === "workspace" ? (
-        <div className="workspace">
-          <nav className="library" aria-label="Documents">
-            <h2 className="pane-title">Documents</h2>
-            <form
-              className={`drop${dragOver ? " over" : ""}`}
-              onDragOver={(event) => { event.preventDefault(); setDragOver(true); }}
-              onDragLeave={() => setDragOver(false)}
-              onDrop={(event) => { event.preventDefault(); setDragOver(false); upload(Array.from(event.dataTransfer.files)); }}
-            >
-              <label className="file">
-                Upload a scan or PDF
-                <input
-                  type="file"
-                  accept=".pdf,.png,.jpg,.jpeg,.tif,.tiff,.webp,application/pdf,image/*"
-                  multiple
-                  onChange={(event) => {
-                    upload(Array.from(event.target.files || []));
-                    event.target.value = "";
-                  }}
-                />
-              </label>
-              <label>
-                Pages
-                <input value={pageRange} onChange={(event) => setPageRange(event.target.value)} placeholder="all, or 1-3, 5" />
-              </label>
-            </form>
-            {docs.length === 0 ? (
-              <p className="quiet">No documents yet. Upload a scan or PDF to start.</p>
-            ) : (
-              <ul className="doc-list">
-                {docs.map((doc) => (
-                  <li key={doc.id}>
-                    <button type="button" className={doc.id === selected ? "selected" : ""} onClick={() => { setSelected(doc.id); setPageNumber(1); setActiveRegion(null); }}>
-                      <span className="doc-name">{doc.filename}</span>
-                      <span className={`doc-meta status-${doc.status}`}>{statusLabel(doc.status)} · {doc.page_count} page{doc.page_count === 1 ? "" : "s"}</span>
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            )}
-            <p className="privacy">Documents stay on this machine. API keys stay in the environment file.</p>
-          </nav>
-
+        <div
+          className={`workspace${hideLeft ? " hide-left" : ""}${hideRight ? " hide-right" : ""}`}
+          style={{ ["--pane-left" as string]: `${left}px`, ["--pane-right" as string]: `${right}px` }}
+        >
+          {hideLeft ? (
+            <div className="rail"><button type="button" onClick={() => setHideLeft(false)}>{t("showDocuments")}</button></div>
+          ) : (
+            <nav className="library" aria-label={t("documents")}>
+              <div className="pane-head">
+                <h2 className="pane-title">{t("documents")}</h2>
+                <button type="button" className="ghost" onClick={() => setHideLeft(true)}>{t("hideDocuments")}</button>
+              </div>
+              <form
+                className={`drop${dragOver ? " over" : ""}`}
+                onDragOver={(event) => { event.preventDefault(); setDragOver(true); }}
+                onDragLeave={() => setDragOver(false)}
+                onDrop={(event) => { event.preventDefault(); setDragOver(false); upload(Array.from(event.dataTransfer.files)); }}
+              >
+                <label className="file">
+                  {t("upload")}
+                  <input
+                    type="file"
+                    accept=".pdf,.png,.jpg,.jpeg,.tif,.tiff,.webp,application/pdf,image/*"
+                    multiple
+                    onChange={(event) => {
+                      upload(Array.from(event.target.files || []));
+                      event.target.value = "";
+                    }}
+                  />
+                </label>
+                <label className="field">
+                  {t("pages")}
+                  <input value={pageRange} onChange={(event) => setPageRange(event.target.value)} placeholder={t("pagesHint")} />
+                </label>
+                <label className="field">
+                  <span className="row">
+                    {t("engine")}
+                    <Tip label={t("engineTip")} />
+                  </span>
+                  <select aria-label={t("engine")} value={uploadEngine} onChange={(event) => setUploadEngine(event.target.value)}>
+                    <option value="tesseract">{t("freeTesseract")}</option>
+                    <option value="ppocr">{t("freePpocr")}</option>
+                    <option value="claude" disabled={!llm}>{t("claude")}</option>
+                    <option value="gemini" disabled={!llm}>{t("gemini")}</option>
+                  </select>
+                </label>
+                {!llm && <p className="quiet">{t("needsKey")}</p>}
+                <label className="field">
+                  {t("collection")}
+                  <input value={collection} placeholder={t("collectionPlaceholder")} onChange={(event) => setCollection(event.target.value)} onBlur={saveDocMeta} />
+                </label>
+                <label className="field">
+                  {t("docLanguage")}
+                  <input list="doc-langs" value={docLanguage} onChange={(event) => setDocLanguage(event.target.value)} onBlur={saveDocMeta} />
+                </label>
+                <datalist id="doc-langs">
+                  {DOC_LANGS.map((code) => <option key={code} value={code} />)}
+                </datalist>
+              </form>
+              {docs.length === 0 ? (
+                <p className="quiet">{t("noDocuments")}</p>
+              ) : (
+                <ul className="doc-list">
+                  {docs.map((doc) => (
+                    <li key={doc.id}>
+                      <button type="button" className={doc.id === selected ? "selected" : ""} onClick={() => { setSelected(doc.id); setPageNumber(1); setActiveRegion(null); }}>
+                        <span className="doc-name">{doc.filename}</span>
+                        <span className={`doc-meta status-${doc.status}`}>
+                          {statusLabel(doc.status)} · {doc.page_count}
+                          {doc.progress ? ` · ${doc.progress}` : ""}
+                        </span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <p className="privacy">{t("privacy")}</p>
+            </nav>
+          )}
+          <div
+            className="resizer left"
+            role="separator"
+            aria-orientation="vertical"
+            aria-label={t("resizeDocuments")}
+            tabIndex={0}
+            onPointerDown={(event) => beginResize("left", event)}
+            onKeyDown={(event) => {
+              if (event.key === "ArrowLeft") setLeft((value) => clamp(value - 16, 200, 520));
+              if (event.key === "ArrowRight") setLeft((value) => clamp(value + 16, 200, 520));
+            }}
+          />
           <main className="page-pane" id="viewer">
             {!detail ? (
-              <p className="quiet">Select a document.</p>
+              <p className="quiet">{t("selectDocument")}</p>
             ) : (
               <>
-                <p className="explanation">{detail.explanation || (detail.status === "processing" || detail.status === "queued" ? "Reading the pages…" : "No explanation yet.")}</p>
+                <p className="explanation">{detail.explanation || ((detail.status === "processing" || detail.status === "queued") ? t("reading") : t("noExplanation"))}</p>
+                {(detail.status === "queued" || detail.status === "processing") && (
+                  <p className="progress" role="status"><span className="bar" aria-hidden="true" />{detail.progress || t("reading")}</p>
+                )}
                 {detail.error && <p className="error">{detail.error}</p>}
+                {findOpen && (
+                  <form className="find-bar" onSubmit={(event) => event.preventDefault()}>
+                    <label className="sr" htmlFor="find">{t("find")}</label>
+                    <input id="find" value={findQuery} autoFocus aria-label={t("find")} placeholder={t("find")} onChange={(event) => setFindQuery(event.target.value)} />
+                  </form>
+                )}
                 <div className="toolbar">
-                  <button type="button" className="ghost" onClick={() => setPageNumber(Math.max(1, (page?.number || 1) - 1))} disabled={!page || page.number <= 1}>Previous page</button>
-                  <span>Page {page?.number || 1} of {detail.page_count}</span>
-                  <button type="button" className="ghost" onClick={() => setPageNumber(Math.min(detail.page_count, (page?.number || 1) + 1))} disabled={!page || page.number >= detail.page_count}>Next page</button>
-                  <button type="button" className="ghost" aria-pressed={showBoxes} onClick={() => setShowBoxes((value) => !value)}>{showBoxes ? "Hide boxes" : "Show boxes"}</button>
-                  {page?.ocr_engine && <span>Read with {page.ocr_engine}</span>}
+                  <button type="button" className="ghost" onClick={() => setPageNumber(Math.max(1, (page?.number || 1) - 1))} disabled={!page || page.number <= 1}>{t("previous")}</button>
+                  <span>{t("pageOf", { n: page?.number || 1, total: detail.page_count })}</span>
+                  <button type="button" className="ghost" onClick={() => setPageNumber(Math.min(detail.page_count, (page?.number || 1) + 1))} disabled={!page || page.number >= detail.page_count}>{t("next")}</button>
+                  <button type="button" className="ghost" aria-pressed={showBoxes} onClick={() => setShowBoxes((value) => !value)}>{showBoxes ? t("hideBoxes") : t("showBoxes")}</button>
+                  {page?.ocr_engine && <span>{t("readWith", { engine: page.ocr_engine })}</span>}
                 </div>
                 <Viewer
                   imageUrl={imageUrl}
@@ -311,87 +563,118 @@ export default function Workspace() {
                   activeId={activeRegion}
                   showBoxes={showBoxes}
                   onSelect={setActiveRegion}
+                  find={findQuery}
+                  labels={{ zoomIn: t("zoomIn"), zoomOut: t("zoomOut"), fit: t("fitPage"), empty: t("nothingOnPage") }}
                 />
-                <section className="transcript" aria-label="Transcription">
-                  <h2 className="pane-title">Transcription</h2>
+                <section className="transcript" aria-label={t("transcription")}>
+                  <h2 className="pane-title">{t("transcription")}</h2>
                   {page?.translation && (
-                    <p className="quiet">Translation ({page.translation_language}): {page.translation.slice(0, 280)}</p>
+                    <p className="quiet">{t("translationPrefix")} ({page.translation_language}): {page.translation.slice(0, 280)}</p>
                   )}
-                  {regions.length === 0 ? <p className="quiet">{page?.text || "Nothing transcribed on this page yet."}</p> : (
+                  {regions.length === 0 ? <p className="quiet">{page?.text || t("nothingOnPage")}</p> : (
                     <ol>
-                      {regions.map((region) => (
-                        <li key={region.id} className={region.id === activeRegion ? "active" : ""}>
-                          <button type="button" onClick={() => setActiveRegion(region.id)}>{region.text || "(empty)"}</button>
-                          {region.confidence > 0 && region.confidence < 0.6 && <span className="flag">low confidence</span>}
-                          {page?.flagged && region.idx === 0 && <span className="flag">needs review</span>}
-                        </li>
-                      ))}
+                      {regions.map((region) => {
+                        const hit = Boolean(findQuery) && region.text.toLowerCase().includes(findQuery.toLowerCase());
+                        return (
+                          <li key={region.id} className={`${region.id === activeRegion ? "active" : ""} ${hit ? "hit" : ""}`}>
+                            <button type="button" onClick={() => setActiveRegion(region.id)}>{region.text || t("empty")}</button>
+                            {region.confidence > 0 && region.confidence < 0.6 && <span className="flag">{t("lowConfidence")}</span>}
+                            {page?.flagged && region.idx === 0 && <span className="flag">{t("needsReview")}</span>}
+                          </li>
+                        );
+                      })}
                     </ol>
                   )}
                 </section>
               </>
             )}
           </main>
-
-          <aside className="chat" aria-label="Chat and notes">
-            <section>
-              <h2 className="pane-title">Ask</h2>
-              <div className="thread" aria-live="polite">
-                {messages.length === 0 && <p className="quiet">Ask about this document. Answers cite a page region, and a library source when one was retrieved.</p>}
-                {messages.map((message) => (
-                  <article key={message.id} className={`bubble ${message.role}`}>
-                    <span className="who">{message.role === "user" ? "You" : "Workbench"}</span>
-                    <MessageText message={message} onCite={onCite} />
-                  </article>
-                ))}
-              </div>
-              <form className="ask" onSubmit={ask}>
-                <label className="sr" htmlFor="question">Question</label>
-                <input id="question" value={question} onChange={(event) => setQuestion(event.target.value)} placeholder="What is this document about?" />
-                <button className="primary" type="submit">Ask</button>
-              </form>
-            </section>
-            <section className="notes">
-              <h2 className="pane-title">Notes</h2>
-              <ul>
-                {(detail?.notes || []).map((item) => (
-                  <li key={item.id}>
-                    <span>{item.body}</span>
-                    <button type="button" className="ghost" onClick={() => removeNote(item.id)}>Delete</button>
-                  </li>
-                ))}
-              </ul>
-              <form onSubmit={addNote}>
-                <label className="sr" htmlFor="note">Note</label>
-                <textarea id="note" value={note} onChange={(event) => setNote(event.target.value)} placeholder="A note on this document" />
-                <button className="ghost" type="submit">Add note</button>
-              </form>
-            </section>
-            {selected && (
+          <div
+            className="resizer right"
+            role="separator"
+            aria-orientation="vertical"
+            aria-label={t("resizeChat")}
+            tabIndex={0}
+            onPointerDown={(event) => beginResize("right", event)}
+            onKeyDown={(event) => {
+              if (event.key === "ArrowLeft") setRight((value) => clamp(value + 16, 260, 560));
+              if (event.key === "ArrowRight") setRight((value) => clamp(value - 16, 260, 560));
+            }}
+          />
+          {hideRight ? (
+            <div className="rail"><button type="button" onClick={() => setHideRight(false)}>{t("showChat")}</button></div>
+          ) : (
+            <aside className="chat" aria-label={t("chat")}>
               <section>
-                <h2 className="pane-title">Export and tools</h2>
-                <div className="exports">
-                  {["docx", "md", "json", "bibtex", "tei", "pdf", "txt"].map((format) => (
-                    <a key={format} href={`/api/documents/${selected}/export?format=${format}`}>{format.toUpperCase()}</a>
+                <div className="pane-head">
+                  <h2 className="pane-title">{t("ask")}</h2>
+                  <span className="row">
+                    <Tip label={t("citationTip")} />
+                    <button type="button" className="ghost" onClick={() => setHideRight(true)}>{t("hideChat")}</button>
+                  </span>
+                </div>
+                <div className="thread" aria-live="polite">
+                  {messages.length === 0 && <p className="quiet">{t("askEmpty")}</p>}
+                  {messages.map((message) => (
+                    <article key={message.id} className={`bubble ${message.role}`}>
+                      <span className="who">{message.role === "user" ? t("you") : t("workbench")}</span>
+                      <MessageText message={message} onCite={onCite} />
+                    </article>
                   ))}
                 </div>
-                <form className="row" onSubmit={(event) => { event.preventDefault(); translate(); }} style={{ marginTop: 10 }}>
-                  <label className="sr" htmlFor="lang">Translation language</label>
-                  <input id="lang" value={language} onChange={(event) => setLanguage(event.target.value)} aria-label="Translation language" />
-                  <button className="ghost" type="submit">Translate</button>
+                <form className="ask" onSubmit={ask}>
+                  <label className="sr" htmlFor="question">{t("question")}</label>
+                  <input id="question" value={question} onChange={(event) => setQuestion(event.target.value)} placeholder={t("askPlaceholder")} />
+                  <button className="primary" type="submit">{t("ask")}</button>
                 </form>
-                <button type="button" className="ghost" style={{ marginTop: 10 }} onClick={removeDoc}>Delete document</button>
               </section>
-            )}
-          </aside>
+              <section className="notes">
+                <h2 className="pane-title">{t("notes")}</h2>
+                <ul>
+                  {(detail?.notes || []).map((item) => (
+                    <li key={item.id}>
+                      <span>{item.body}</span>
+                      <button type="button" className="ghost" onClick={() => removeNote(item.id)}>{t("delete")}</button>
+                    </li>
+                  ))}
+                </ul>
+                <form onSubmit={addNote}>
+                  <label className="sr" htmlFor="note">{t("note")}</label>
+                  <textarea id="note" value={note} onChange={(event) => setNote(event.target.value)} placeholder={t("notePlaceholder")} />
+                  <button className="ghost" type="submit">{t("addNote")}</button>
+                </form>
+              </section>
+              {selected && (
+                <section>
+                  <h2 className="pane-title">{t("export")}</h2>
+                  <div className="exports">
+                    {["docx", "md", "json", "bibtex", "tei", "pdf", "txt"].map((format) => (
+                      <a key={format} href={`/api/documents/${selected}/export?format=${format}`}>{format.toUpperCase()}</a>
+                    ))}
+                  </div>
+                  <form className="row" onSubmit={(event) => { event.preventDefault(); translate(); }} style={{ marginTop: 10 }}>
+                    <label className="field" style={{ flex: 1 }}>
+                      {t("translationLanguage")}
+                      <input list="tr-langs" value={language} onChange={(event) => setLanguage(event.target.value)} aria-label={t("translationLanguage")} />
+                    </label>
+                    <datalist id="tr-langs">
+                      {DOC_LANGS.filter((code) => code !== "en").map((code) => <option key={code} value={code} />)}
+                    </datalist>
+                    <button className="ghost" type="submit">{t("translate")}</button>
+                  </form>
+                  <button type="button" className="ghost" style={{ marginTop: 10 }} onClick={removeDoc}>{t("deleteDocument")}</button>
+                </section>
+              )}
+            </aside>
+          )}
         </div>
-      ) : (
-        <section className="library-search" aria-label="Library search">
-          <h2 className="pane-title">Open libraries</h2>
-          <p className="quiet">Search sends the query only, not your documents. Europeana and DPLA stay quiet until a key is set.</p>
+      ) : view === "library" ? (
+        <section className="library-search" aria-label={t("libraries")}>
+          <h2 className="pane-title">{t("libraries")}</h2>
+          <p className="quiet">{t("librariesHelp")}</p>
           <form onSubmit={runLibrary}>
-            <label className="sr" htmlFor="q">Library query</label>
-            <input id="q" type="search" role="searchbox" value={query} onChange={(event) => setQuery(event.target.value)} />
+            <label className="sr" htmlFor="q">{t("libraryQuery")}</label>
+            <input id="q" type="search" value={query} aria-label={t("libraryQuery")} onChange={(event) => setQuery(event.target.value)} />
             <div className="sources">
               {SOURCES.map(([id, label]) => (
                 <label key={id}>
@@ -401,18 +684,18 @@ export default function Workspace() {
                     onChange={(event) => {
                       setPicked((current) => event.target.checked ? [...current, id] : current.filter((item) => item !== id));
                     }}
-                  /> {label}
+                  /> {label}{(id === "europeana" || id === "dpla") ? ` (${t("needsKey")})` : ""}
                 </label>
               ))}
             </div>
-            <button className="primary" type="submit">Search</button>
+            <button className="primary" type="submit">{t("search")}</button>
           </form>
           {library && (
             <>
               <div className="chips">
                 {library.map((block) => (
                   <span key={block.source} className={`chip${block.status === "ok" ? "" : " warn"}`}>
-                    {block.source}: {block.status === "ok" ? `${block.hits.length} hits` : block.status === "not_configured" ? "not configured" : block.error || block.status}
+                    {block.source}: {block.status === "ok" ? `${block.hits.length}` : block.status === "not_configured" ? "not configured" : block.error || block.status}
                   </span>
                 ))}
               </div>
@@ -430,8 +713,105 @@ export default function Workspace() {
             </>
           )}
         </section>
+      ) : (
+        <SettingsPanel onSaved={setSettings} />
+      )}
+
+      {searchOpen && (
+        <div className="modal" onMouseDown={() => setSearchOpen(false)}>
+          <div
+            className="modal-card"
+            role="dialog"
+            aria-modal="true"
+            aria-label={t("documentSearch")}
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <p className="quiet">{t("yourDocumentsNote")}</p>
+            <form onSubmit={(event) => event.preventDefault()}>
+              <label className="sr" htmlFor="doc-search">{t("documentSearch")}</label>
+              <input
+                id="doc-search"
+                className="search-field"
+                type="search"
+                autoFocus
+                role="searchbox"
+                aria-label={t("documentSearch")}
+                placeholder={t("searchPlaceholder")}
+                value={searchQuery}
+                onChange={(event) => setSearchQuery(event.target.value)}
+              />
+            </form>
+            <div className="filters">
+              <label className="field">
+                {t("collection")}
+                <input value={filterCollection} onChange={(event) => setFilterCollection(event.target.value)} />
+              </label>
+              <label className="field">
+                {t("docLanguage")}
+                <input value={filterLanguage} placeholder={t("anyLanguage")} onChange={(event) => setFilterLanguage(event.target.value)} />
+              </label>
+              <label className="field">
+                {t("dateUploaded")}
+                <select aria-label={t("dateUploaded")} value={filterWhen} onChange={(event) => setFilterWhen(event.target.value)}>
+                  <option value="">{t("anyTime")}</option>
+                  <option value="week">{t("pastWeek")}</option>
+                  <option value="month">{t("pastMonth")}</option>
+                </select>
+              </label>
+              <label className="field">
+                {t("engine")}
+                <select aria-label={t("engine")} value={filterEngine} onChange={(event) => setFilterEngine(event.target.value)}>
+                  <option value="">{t("anyEngine")}</option>
+                  <option value="tesseract">Tesseract</option>
+                  <option value="ppocr">PP-OCR</option>
+                  <option value="claude">Claude</option>
+                  <option value="gemini">Gemini</option>
+                </select>
+              </label>
+            </div>
+            {searchHits && searchHits.length === 0 && <p className="quiet">{t("noMatches")}</p>}
+            {searchHits && searchHits.length > 0 && (
+              <ul className="hit-list">
+                {searchHits.map((hit, index) => (
+                  <li key={`${hit.document_id}-${hit.kind}-${hit.page}-${index}`}>
+                    <button type="button" className="hit-card" onClick={() => openHit(hit)}>
+                      <h3>{hit.title || hit.filename}</h3>
+                      <p className="hit-meta">{kindLabel(hit.kind)}{hit.page ? ` · ${hit.page}` : ""}</p>
+                      <p dangerouslySetInnerHTML={{ __html: hit.snippet }} />
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+            <p style={{ marginTop: 12 }}><button type="button" className="ghost" onClick={() => setSearchOpen(false)}>{t("close")}</button></p>
+          </div>
+        </div>
+      )}
+
+      {showOnboarding && (
+        <div className="modal" onMouseDown={dismissOnboarding}>
+          <div className="modal-card onboard" role="dialog" aria-modal="true" aria-label={t("gettingStarted")} onMouseDown={(event) => event.stopPropagation()}>
+            <h2>{t("gettingStarted")}</h2>
+            <ol>
+              <li>{t("stepUpload")}</li>
+              <li>{t("stepOcr")}</li>
+              <li>{t("stepAsk")}</li>
+              <li>{t("stepExport")}</li>
+            </ol>
+            <button type="button" className="primary" onClick={dismissOnboarding}>{t("gotIt")}</button>
+          </div>
+        </div>
       )}
     </div>
+  );
+}
+
+function Tip({ label }: { label: string }) {
+  return (
+    <span className="tip">
+      <button type="button" className="tip-btn" aria-label={label}>?</button>
+      <span role="tooltip" className="tip-pop">{label}</span>
+    </span>
   );
 }
 
