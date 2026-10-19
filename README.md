@@ -35,7 +35,9 @@ git pull
 docker compose up --build -d
 ```
 
-Then open http://localhost:3000. The rebuild is slow the first time because the API image installs the OCR runtime. Later page edits are ordinary.
+Then open http://localhost:3000. `http://127.0.0.1:3000` redirects there, so Google sign-in still matches the localhost redirect URI. The rebuild is slow the first time because the API image installs the OCR runtime. Later page edits are ordinary.
+
+Each file can be up to 500 MB (`MAX_FILE_MB` in `.env`, then restart). The upload bar shows progress. A file over the limit is refused with the size and the way to raise it.
 
 `AUTH_DISABLED=true` in `.env.example` leaves sign-in off so the workbench still opens. The API logs a warning while that is set.
 
@@ -126,7 +128,7 @@ Leave `AUTH_DISABLED=true` until you want accounts. Then, in Google Cloud Consol
 5. Copy the client id and secret into `.env` as `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`. Set `APP_BASE_URL` to the same origin you open in the browser (`http://localhost:3000` locally). Set `AUTH_DISABLED=false`. Set `ADMIN_EMAILS` (the default is `praveenmaths89@gmail.com`), and optionally `ALLOWED_EMAILS` and `ALLOWED_DOMAINS`.
 6. Restart once so the new environment is read: `docker compose up -d`. After that, an admin adds and removes people from Settings without a restart.
 
-Open http://localhost:3000, not http://127.0.0.1:3000, so the cookie and the redirect URI match. Anyone who is not on the list sees “Access not granted”. Sessions are an HTTP-only cookie for 14 days. Sign out is in Settings.
+Open http://localhost:3000. If you open http://127.0.0.1:3000, the page redirects to localhost so the cookie and the redirect URI match. Anyone who is not on the list sees “Access not granted”. Sessions are an HTTP-only cookie for 14 days. Sign out is in Settings.
 
 ## Tests
 

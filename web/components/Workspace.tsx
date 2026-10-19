@@ -1,12 +1,15 @@
 "use client";
 
 import dynamic from "next/dynamic";
-import { FormEvent, PointerEvent as ReactPointerEvent, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, PointerEvent as ReactPointerEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { LOCALES, LOCALE_NAMES, useI18n, type Locale } from "@/lib/i18n";
 import type { Region } from "./Viewer";
 import SettingsPanel, { type SettingsView } from "./SettingsPanel";
 
-const Viewer = dynamic(() => import("./Viewer"), { ssr: false });
+const Viewer = dynamic(() => import("./Viewer"), {
+  ssr: false,
+  loading: () => <div className="viewer-slot" aria-hidden="true" />,
+});
 
 type DocSummary = {
   id: string;
@@ -78,6 +81,16 @@ function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
 }
 
+function applyPanes(left: number, right: number, hideLeft: boolean, hideRight: boolean) {
+  const root = document.documentElement;
+  root.style.setProperty("--pane-left", `${left}px`);
+  root.style.setProperty("--pane-right", `${right}px`);
+  if (hideLeft) root.dataset.hideLeft = "1";
+  else delete root.dataset.hideLeft;
+  if (hideRight) root.dataset.hideRight = "1";
+  else delete root.dataset.hideRight;
+}
+
 export default function Workspace() {
   const { t, locale, setLocale, theme, setTheme } = useI18n();
   const [view, setView] = useState<"workspace" | "library" | "settings">("workspace");
@@ -114,9 +127,13 @@ export default function Workspace() {
   const [findQuery, setFindQuery] = useState("");
   const [hideLeft, setHideLeft] = useState(false);
   const [hideRight, setHideRight] = useState(false);
-  const [left, setLeft] = useState(280);
-  const [right, setRight] = useState(360);
+  const [left, setLeft] = useState(260);
+  const [right, setRight] = useState(300);
   const [panesReady, setPanesReady] = useState(false);
+  const [listReady, setListReady] = useState(false);
+  const [maxMb, setMaxMb] = useState(500);
+  const [progress, setProgress] = useState<number | null>(null);
+  const [stageOver, setStageOver] = useState(false);
   const [showOnboarding, setShowOnboarding] = useState(false);
   const searchOpenRef = useRef(false);
   const viewRef = useRef(view);
@@ -142,26 +159,42 @@ export default function Workspace() {
     if (msgRes.ok) setMessages(await msgRes.json());
   }
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const storedLeft = Number(localStorage.getItem("aw-pane-left"));
     const storedRight = Number(localStorage.getItem("aw-pane-right"));
-    if (storedLeft >= 200 && storedLeft <= 520) setLeft(storedLeft);
-    if (storedRight >= 260 && storedRight <= 560) setRight(storedRight);
-    setHideLeft(localStorage.getItem("aw-hide-left") === "1");
-    setHideRight(localStorage.getItem("aw-hide-right") === "1");
+    const nextLeft = storedLeft >= 200 && storedLeft <= 520 ? storedLeft : 260;
+    const nextRight = storedRight >= 240 && storedRight <= 560 ? storedRight : 300;
+    const nextHideLeft = localStorage.getItem("aw-hide-left") === "1";
+    const nextHideRight = localStorage.getItem("aw-hide-right") === "1";
+    setLeft(nextLeft);
+    setRight(nextRight);
+    setHideLeft(nextHideLeft);
+    setHideRight(nextHideRight);
+    applyPanes(nextLeft, nextRight, nextHideLeft, nextHideRight);
     setPanesReady(true);
     if (!localStorage.getItem("aw-onboarded")) setShowOnboarding(true);
     fetch("/api/settings").then(async (response) => {
       if (response.ok) setSettings(await response.json());
     }).catch(() => {});
+    fetch("/api/health").then(async (response) => {
+      if (!response.ok) return;
+      const body = await response.json();
+      if (typeof body.max_file_mb === "number" && body.max_file_mb > 0) setMaxMb(body.max_file_mb);
+    }).catch(() => {});
   }, []);
 
   useEffect(() => {
     if (!panesReady) return;
+    applyPanes(left, right, hideLeft, hideRight);
+    const cookie = "; Path=/; Max-Age=31536000; SameSite=Lax";
     localStorage.setItem("aw-pane-left", String(left));
     localStorage.setItem("aw-pane-right", String(right));
     localStorage.setItem("aw-hide-left", hideLeft ? "1" : "0");
     localStorage.setItem("aw-hide-right", hideRight ? "1" : "0");
+    document.cookie = `aw-pane-left=${left}${cookie}`;
+    document.cookie = `aw-pane-right=${right}${cookie}`;
+    document.cookie = `aw-hide-left=${hideLeft ? "1" : "0"}${cookie}`;
+    document.cookie = `aw-hide-right=${hideRight ? "1" : "0"}${cookie}`;
   }, [left, right, hideLeft, hideRight, panesReady]);
 
   useEffect(() => {
@@ -182,6 +215,8 @@ export default function Workspace() {
         if (!stop) setApiDown(false);
       } catch {
         if (!stop) setApiDown(true);
+      } finally {
+        if (!stop) setListReady(true);
       }
     }
     tick();
@@ -252,9 +287,20 @@ export default function Workspace() {
     return t(STATUS_KEY[status] || status);
   }
 
-  async function upload(files: File[]) {
+  function upload(files: File[]) {
     if (!files.length) return;
+    const limit = maxMb * 1024 * 1024;
+    const tooBig = files.find((file) => file.size > limit);
+    if (tooBig) {
+      setError(t("errorTooBig", {
+        name: tooBig.name,
+        size: (tooBig.size / (1024 * 1024)).toFixed(1),
+        max: maxMb,
+      }));
+      return;
+    }
     setBusy("busyUpload");
+    setProgress(0);
     setError("");
     const body = new FormData();
     for (const file of files) body.append("files", file);
@@ -265,20 +311,42 @@ export default function Workspace() {
     if (collection.trim()) options.collection = collection.trim();
     if (docLanguage.trim()) options.language = docLanguage.trim();
     body.append("options", JSON.stringify(options));
-    const response = await fetch("/api/documents", { method: "POST", body });
-    setBusy("");
-    if (!response.ok) {
-      setError(t("errorUpload"));
-      return;
-    }
-    const payload = await response.json();
-    const queued = (payload.documents || []).find((row: { status: string; id: string }) => row.status === "queued");
-    if (queued) {
-      setSelected(queued.id);
-      setPageNumber(1);
-      setActiveRegion(null);
-    }
-    await refreshList();
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", "/api/documents");
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable) setProgress(Math.round((event.loaded / event.total) * 100));
+    };
+    xhr.onerror = () => {
+      setBusy("");
+      setProgress(null);
+      setError(t("errorUpload", { max: maxMb }));
+    };
+    xhr.onload = () => {
+      setBusy("");
+      setProgress(null);
+      let payload: { detail?: string; documents?: { status: string; id: string; filename: string; error?: string }[] } = {};
+      try {
+        payload = JSON.parse(xhr.responseText || "{}");
+      } catch {
+        payload = {};
+      }
+      if (xhr.status < 200 || xhr.status >= 300) {
+        setError(payload.detail ? `${t("errorUpload", { max: maxMb })} ${payload.detail}` : t("errorUpload", { max: maxMb }));
+        return;
+      }
+      const rejected = (payload.documents || []).filter((row) => row.status === "rejected");
+      if (rejected.length) {
+        setError(rejected.map((row) => t("errorRejected", { name: row.filename, detail: row.error || t("errorUpload", { max: maxMb }) })).join(" "));
+      }
+      const queued = (payload.documents || []).find((row) => row.status === "queued");
+      if (queued) {
+        setSelected(queued.id);
+        setPageNumber(1);
+        setActiveRegion(null);
+      }
+      refreshList().catch(() => setApiDown(true));
+    };
+    xhr.send(body);
   }
 
   async function ask(event: FormEvent) {
@@ -386,8 +454,15 @@ export default function Workspace() {
     const start = which === "left" ? left : right;
     function move(ev: PointerEvent) {
       const dx = ev.clientX - startX;
-      if (which === "left") setLeft(clamp(start + dx, 200, 520));
-      else setRight(clamp(start - dx, 260, 560));
+      if (which === "left") {
+        const next = clamp(start + dx, 200, 520);
+        setLeft(next);
+        document.documentElement.style.setProperty("--pane-left", `${next}px`);
+      } else {
+        const next = clamp(start - dx, 240, 560);
+        setRight(next);
+        document.documentElement.style.setProperty("--pane-right", `${next}px`);
+      }
     }
     function up() {
       window.removeEventListener("pointermove", move);
@@ -437,19 +512,22 @@ export default function Workspace() {
           >
             {theme === "dark" ? t("lightMode") : t("darkMode")}
           </button>
-          {busy && <span className="quiet" role="status">{t(busy)}</span>}
         </div>
       </header>
       {(apiDown || error) && <p className="error banner" role="alert">{apiDown ? t("errorApi") : error}</p>}
+      {progress !== null && (
+        <p className="progress upload-progress" role="status">
+          <progress value={progress} max={100} />
+          {t("uploadProgress", { n: progress })}
+        </p>
+      )}
 
       {view === "workspace" ? (
-        <div
-          className={`workspace${hideLeft ? " hide-left" : ""}${hideRight ? " hide-right" : ""}`}
-          style={{ ["--pane-left" as string]: `${left}px`, ["--pane-right" as string]: `${right}px` }}
-        >
-          {hideLeft ? (
-            <div className="rail"><button type="button" onClick={() => setHideLeft(false)}>{t("showDocuments")}</button></div>
-          ) : (
+        <div className="workspace">
+          <div className="slot slot-left">
+            <div className="rail rail-left">
+              <button type="button" onClick={() => setHideLeft(false)}>{t("showDocuments")}</button>
+            </div>
             <nav className="library" aria-label={t("documents")}>
               <div className="pane-head">
                 <h2 className="pane-title">{t("documents")}</h2>
@@ -489,7 +567,7 @@ export default function Workspace() {
                     <option value="gemini" disabled={!llm}>{t("gemini")}</option>
                   </select>
                 </label>
-                {!llm && <p className="quiet">{t("needsKey")}</p>}
+                <p className="quiet needs-key">{settings && !llm ? t("needsKey") : "\u00a0"}</p>
                 <label className="field">
                   {t("collection")}
                   <input value={collection} placeholder={t("collectionPlaceholder")} onChange={(event) => setCollection(event.target.value)} onBlur={saveDocMeta} />
@@ -521,7 +599,7 @@ export default function Workspace() {
               )}
               <p className="privacy">{t("privacy")}</p>
             </nav>
-          )}
+          </div>
           <div
             className="resizer left"
             role="separator"
@@ -535,8 +613,32 @@ export default function Workspace() {
             }}
           />
           <main className="page-pane" id="viewer">
-            {!detail ? (
-              <p className="quiet">{t("selectDocument")}</p>
+            {!listReady || (docs.length > 0 && !detail) ? (
+              <div className="viewer-slot" aria-hidden="true" />
+            ) : !detail ? (
+              <div
+                className={`empty-stage${stageOver ? " over" : ""}`}
+                onDragOver={(event) => { event.preventDefault(); setStageOver(true); }}
+                onDragLeave={() => setStageOver(false)}
+                onDrop={(event) => { event.preventDefault(); setStageOver(false); upload(Array.from(event.dataTransfer.files)); }}
+              >
+                <h2>{t("emptyTitle")}</h2>
+                <p>{t("emptyBody")}</p>
+                <label className="file">
+                  {t("dropHere")}
+                  <input
+                    type="file"
+                    aria-label={t("dropHere")}
+                    accept=".pdf,.png,.jpg,.jpeg,.tif,.tiff,.webp,application/pdf,image/*"
+                    multiple
+                    onChange={(event) => {
+                      upload(Array.from(event.target.files || []));
+                      event.target.value = "";
+                    }}
+                  />
+                </label>
+                <p className="quiet">{t("upTo", { max: maxMb })}</p>
+              </div>
             ) : (
               <>
                 <p className="explanation">{detail.explanation || ((detail.status === "processing" || detail.status === "queued") ? t("reading") : t("noExplanation"))}</p>
@@ -597,13 +699,14 @@ export default function Workspace() {
             tabIndex={0}
             onPointerDown={(event) => beginResize("right", event)}
             onKeyDown={(event) => {
-              if (event.key === "ArrowLeft") setRight((value) => clamp(value + 16, 260, 560));
-              if (event.key === "ArrowRight") setRight((value) => clamp(value - 16, 260, 560));
+              if (event.key === "ArrowLeft") setRight((value) => clamp(value + 16, 240, 560));
+              if (event.key === "ArrowRight") setRight((value) => clamp(value - 16, 240, 560));
             }}
           />
-          {hideRight ? (
-            <div className="rail"><button type="button" onClick={() => setHideRight(false)}>{t("showChat")}</button></div>
-          ) : (
+          <div className="slot slot-right">
+            <div className="rail rail-right">
+              <button type="button" onClick={() => setHideRight(false)}>{t("showChat")}</button>
+            </div>
             <aside className="chat" aria-label={t("chat")}>
               <section>
                 <div className="pane-head">
@@ -666,7 +769,7 @@ export default function Workspace() {
                 </section>
               )}
             </aside>
-          )}
+          </div>
         </div>
       ) : view === "library" ? (
         <section className="library-search" aria-label={t("libraries")}>

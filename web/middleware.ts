@@ -29,6 +29,7 @@ export async function middleware(request: NextRequest) {
   return NextResponse.redirect(url);
 }
 
+// /api is excluded so uploads are not buffered by the middleware body clone.
 export const config = {
-  matcher: ["/((?!_next/static|_next/image|favicon.ico).*)"],
+  matcher: ["/((?!_next/static|_next/image|favicon.ico|api/).*)"],
 };

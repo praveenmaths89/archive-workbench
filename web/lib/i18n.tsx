@@ -1,6 +1,6 @@
 "use client";
 
-import { createContext, useContext, useEffect, useMemo, useState } from "react";
+import { createContext, useContext, useLayoutEffect, useMemo, useState } from "react";
 
 export const LOCALES = ["en", "hi", "kn", "mr", "ta", "te", "bn"] as const;
 export type Locale = (typeof LOCALES)[number];
@@ -140,7 +140,14 @@ const en: Dict = {
   providerCustom: "OpenAI-compatible",
   saved: "Saved.",
   errorApi: "The workbench cannot reach its own server. If you just started it, wait a moment and reload.",
-  errorUpload: "Upload failed.",
+  errorUpload: "Upload failed. If the file is over the limit, choose a smaller one or raise MAX_FILE_MB and restart the workbench.",
+  errorTooBig: "{name} is {size} MB. The limit is {max} MB. Choose a smaller file, or raise MAX_FILE_MB and restart the workbench.",
+  errorRejected: "{name}: {detail}",
+  uploadProgress: "Uploading {n}%",
+  emptyTitle: "Drop a scan or PDF here",
+  emptyBody: "The file stays on this computer. Pages, the OCR engine, and the collection are set in the documents pane.",
+  dropHere: "Choose a file",
+  upTo: "Up to {max} MB per file.",
   errorAsk: "Could not ask that question.",
   errorWait: "Wait until reading finishes, then ask again.",
   errorSearch: "Search failed.",
@@ -293,7 +300,14 @@ const hi: Dict = {
   fromEnv: "एनवायरनमेंट से",
   saved: "सहेजा गया।",
   errorApi: "वर्कबेंच अपने सर्वर तक नहीं पहुँच पा रहा। अभी शुरू किया है तो थोड़ी देर बाद पुनः लोड करें।",
-  errorUpload: "अपलोड असफल।",
+  errorUpload: "अपलोड असफल। फ़ाइल सीमा से बड़ी हो तो छोटी चुनें, या MAX_FILE_MB बढ़ाकर वर्कबेंच पुनः आरंभ करें।",
+  errorTooBig: "{name} {size} MB है। सीमा {max} MB है। छोटी फ़ाइल चुनें, या MAX_FILE_MB बढ़ाकर वर्कबेंच पुनः आरंभ करें।",
+  errorRejected: "{name}: {detail}",
+  uploadProgress: "अपलोड {n}%",
+  emptyTitle: "स्कैन या PDF यहाँ छोड़ें",
+  emptyBody: "फ़ाइल इसी कंप्यूटर पर रहती है। पृष्ठ, ओसीआर इंजन, और संग्रह दस्तावेज़ पैन में सेट होते हैं।",
+  dropHere: "फ़ाइल चुनें",
+  upTo: "प्रति फ़ाइल {max} MB तक।",
   errorAsk: "यह प्रश्न नहीं पूछा जा सका।",
   errorWait: "पढ़ना समाप्त होने दें, फिर पूछें।",
   errorSearch: "खोज असफल।",
@@ -619,38 +633,50 @@ type Ctx = {
 
 const I18nContext = createContext<Ctx | null>(null);
 
-export function I18nProvider({ children }: { children: React.ReactNode }) {
-  const [locale, setLocaleState] = useState<Locale>("en");
-  const [theme, setThemeState] = useState<"light" | "dark">("light");
+function persistPrefs(locale: string, theme: string) {
+  document.documentElement.lang = locale;
+  document.documentElement.dataset.locale = locale;
+  document.documentElement.dataset.theme = theme;
+  document.cookie = `aw-locale=${locale}; Path=/; Max-Age=31536000; SameSite=Lax`;
+  document.cookie = `aw-theme=${theme}; Path=/; Max-Age=31536000; SameSite=Lax`;
+  localStorage.setItem("aw-locale", locale);
+  localStorage.setItem("aw-theme", theme);
+}
 
-  useEffect(() => {
+export function I18nProvider({
+  children,
+  initialLocale = "en",
+  initialTheme = "light",
+}: {
+  children: React.ReactNode;
+  initialLocale?: Locale;
+  initialTheme?: "light" | "dark";
+}) {
+  const [locale, setLocaleState] = useState<Locale>(initialLocale);
+  const [theme, setThemeState] = useState<"light" | "dark">(initialTheme);
+  const [ready, setReady] = useState(false);
+
+  useLayoutEffect(() => {
     const stored = localStorage.getItem("aw-locale");
-    if (stored && (LOCALES as readonly string[]).includes(stored)) setLocaleState(stored as Locale);
+    const nextLocale = stored && (LOCALES as readonly string[]).includes(stored) ? stored as Locale : initialLocale;
     const storedTheme = localStorage.getItem("aw-theme");
-    if (storedTheme === "dark" || storedTheme === "light") setThemeState(storedTheme);
-    else if (window.matchMedia("(prefers-color-scheme: dark)").matches) setThemeState("dark");
-  }, []);
+    const nextTheme = storedTheme === "dark" || storedTheme === "light" ? storedTheme : initialTheme;
+    setLocaleState(nextLocale);
+    setThemeState(nextTheme);
+    persistPrefs(nextLocale, nextTheme);
+    setReady(true);
+  }, [initialLocale, initialTheme]);
 
-  useEffect(() => {
-    document.documentElement.lang = locale;
-    document.documentElement.dataset.locale = locale;
-  }, [locale]);
-
-  useEffect(() => {
-    document.documentElement.dataset.theme = theme;
-  }, [theme]);
+  useLayoutEffect(() => {
+    if (!ready) return;
+    persistPrefs(locale, theme);
+  }, [ready, locale, theme]);
 
   const value = useMemo<Ctx>(() => ({
     locale,
     theme,
-    setLocale: (next) => {
-      setLocaleState(next);
-      localStorage.setItem("aw-locale", next);
-    },
-    setTheme: (next) => {
-      setThemeState(next);
-      localStorage.setItem("aw-theme", next);
-    },
+    setLocale: (next) => setLocaleState(next),
+    setTheme: (next) => setThemeState(next),
     t: (key, vars) => fill((ALL[locale] && ALL[locale][key]) || en[key] || key, vars),
   }), [locale, theme]);
 

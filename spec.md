@@ -33,7 +33,7 @@ Documents and API keys stay on the machine that runs the app. Nothing is uploade
 These behaviours were built and checked against sample pages (a British Library Minute Paper, Elphinstone letters, and Dharwar material). They remain requirements.
 
 - Single and batch upload. A bad file is rejected on its own and does not fail the batch.
-- File types: PDF, PNG, JPEG, TIFF, WEBP. Type is detected from magic bytes, not the extension. Encrypted or corrupt files get a clear error. Limits, configurable: 50 files per batch, 100 MB per file, 500 pages per file.
+- File types: PDF, PNG, JPEG, TIFF, WEBP. Type is detected from magic bytes, not the extension. Encrypted or corrupt files get a clear error. Limits, configurable: 50 files per batch, 500 MB per file (`MAX_FILE_MB`), 500 pages per file. The upload form shows progress and names the limit when a file is too large.
 - Page selection at upload (`1-5, 8, 12-`) and again later. Unselected pages are not sent to an OCR engine. They can still be previewed.
 - Start and stop. Stopping finishes the page in progress and keeps finished pages. The rest can be run later.
 - A provider failure that will hit every page (bad key, no credit) stops the run with a plain message. Finished pages are kept.
@@ -382,10 +382,11 @@ See `.env.example`. The names that matter:
 | `ALLOWED_EMAILS` | empty | Comma-separated emails that may sign in |
 | `ALLOWED_DOMAINS` | empty | Comma-separated domains, such as `university.ac.in` |
 | `ADMIN_EMAILS` | `praveenmaths89@gmail.com` | Admins. May change keys and the allowlist |
+| `MAX_FILE_MB` | `500` | Largest upload, in megabytes. Restart after changing it |
 
 `ANTHROPIC_API_KEY` is still read if `LLM_API_KEY` is empty, so a v0.2 `.env` keeps working. A key saved in Settings wins over both.
 
-The Google client is created in Google Cloud Console: APIs & Services → OAuth consent screen (External is fine for a test, add the allowlisted Gmail addresses as test users while the app is in testing), then Credentials → OAuth client ID → Web application. Authorised JavaScript origins: `http://localhost:3000` and, later, `https://<your-domain>`. Authorised redirect URIs: `http://localhost:3000/api/auth/callback` and `https://<your-domain>/api/auth/callback`. Copy the client id and secret into `.env`. Set `AUTH_DISABLED=false` and restart once so the new environment is read. After that, allowlist edits do not need a restart.
+The Google client is created in Google Cloud Console: APIs & Services → OAuth consent screen (External is fine for a test, add the allowlisted Gmail addresses as test users while the app is in testing), then Credentials → OAuth client ID → Web application. Authorised JavaScript origins: `http://localhost:3000` and, later, `https://<your-domain>`. Authorised redirect URIs: `http://localhost:3000/api/auth/callback` and `https://<your-domain>/api/auth/callback`. Copy the client id and secret into `.env`. Set `AUTH_DISABLED=false` and restart once so the new environment is read. After that, allowlist edits do not need a restart. Opening `http://127.0.0.1:3000` redirects to `http://localhost:3000` so the sign-in cookie matches that redirect URI.
 
 ## 15. Repository layout
 

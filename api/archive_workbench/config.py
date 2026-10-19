@@ -48,7 +48,7 @@ class Settings(BaseSettings):
     render_dpi: int = 200
     api_image_max_edge: int = 2000
     max_files_per_job: int = 50
-    max_file_mb: int = 100
+    max_file_mb: int = 500
     max_pages_per_file: int = 500
     library_cache_hours: int = 24
 

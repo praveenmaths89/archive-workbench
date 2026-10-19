@@ -45,6 +45,7 @@ def test_health(client):
     assert body["llm"] is False
     assert body["embedding"] == "hash"
     assert body["ocr_engine"] == "tesseract"
+    assert body["max_file_mb"] == 500
 
 
 def test_reject_bad_file_and_keep_the_batch(client):

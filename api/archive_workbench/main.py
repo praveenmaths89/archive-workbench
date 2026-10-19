@@ -205,6 +205,7 @@ def health():
         "llm": runtime.configured,
         "embedding": settings.embedding_provider,
         "auth_disabled": settings.auth_disabled,
+        "max_file_mb": settings.max_file_mb,
     }
 
 
@@ -244,7 +245,10 @@ async def upload_documents(
                 out.write(chunk)
         try:
             if size > settings.max_file_mb * 1024 * 1024:
-                raise IngestError(f"file exceeds {settings.max_file_mb} MB")
+                raise IngestError(
+                    f"file is larger than {settings.max_file_mb} MB. "
+                    "Choose a smaller file, or raise MAX_FILE_MB and restart the workbench."
+                )
             kind = detect_kind(src)
             total = page_count(src, kind)
             spec = (opts.get("pages_by_file") or {}).get(name, opts.get("pages"))
