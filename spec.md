@@ -1,6 +1,6 @@
 # Archive Workbench
 
-Version 1.0
+Version 1.1
 Author: Praveen D Chougale
 Contact: praveenmaths89@gmail.com
 Licence: Apache-2.0
@@ -21,6 +21,10 @@ It runs on one machine first. Cloud deployment is a later step, described under 
 - Translate a transcription into Indian languages (and other languages the configured model can handle).
 - Keep notes on a document.
 - Export DOCX, Markdown, JSON, BibTeX, and TEI. The searchable PDF and plain text from v0.2 stay available.
+- Search across every document on the machine (transcription, translation, and notes) and jump back to the page.
+- Choose the OCR engine, and paste a model key in Settings if they want Claude or Gemini to read a page.
+- Sign in with Google when the administrator has turned sign-in on. People who are not on the allowlist see a plain refusal.
+- Use the interface in English, Hindi, Kannada, Marathi, Tamil, Telugu, or Bengali.
 
 Documents and API keys stay on the machine that runs the app. Nothing is uploaded to a hosted Archive Workbench service, because there isn't one in v1.
 
@@ -41,7 +45,7 @@ These behaviours were built and checked against sample pages (a British Library 
 - Blank pages are detected and not sent to a model.
 - Complexity signals (blur, contrast, ink density, background unevenness) and tier routing remain for vision OCR. Historical scans are biased to the strongest configured vision model. If confidence is under 0.85 the page is escalated once.
 - Research treats the document and fetched pages as data, not as instructions.
-- Optional shared password. Empty password means no login, which matches an internal or single-user install.
+- Sign-in is optional. `AUTH_DISABLED=true` leaves the app open on a single machine, which is the local default. When sign-in is on, only allowlisted Google accounts get in. The old shared `APP_PASSWORD` is no longer the login.
 
 Translation was specified in v0.2 and not built. It is in v1, and the first targets are Indian languages rather than only English and major European languages. Web research no longer depends on Anthropic's built-in search tool. Library connectors and the model's own knowledge, grounded by retrieval, take that role. A general web-search API can still be added behind the same connector interface.
 
@@ -69,8 +73,8 @@ Worker process ──► same Postgres queue
 | Queue | Rows in Postgres, claimed with `FOR UPDATE SKIP LOCKED`. No Redis |
 | Worker | Separate process, same codebase as the API |
 | UI | Next.js (App Router, TypeScript), OpenSeadragon for the page |
-| OCR default | Tesseract, offline, `eng+kan+mar+hin` |
-| OCR optional | Claude or Gemini vision when the user sets a key. Kraken is not in v1 |
+| OCR default | Tesseract, offline, `eng+kan+mar+hin`. PP-OCR is the other free engine |
+| OCR optional | Claude or Gemini vision when a key is saved or set in the environment. Kraken and Surya are not built in |
 | Models | LiteLLM used as a library. Anthropic, Gemini, OpenAI, Ollama |
 | Agent | Plain Python. LangGraph is deferred to v2 |
 | Embeddings | `intfloat/multilingual-e5-small` (384 dimensions) via sentence-transformers, unless an API embedding model is configured |
@@ -80,15 +84,45 @@ The API process serves HTTP and writes jobs. The worker claims jobs. OCR, embedd
 
 ## 4. OCR
 
-Default engine is Tesseract. It needs no key and no network. The Docker image installs traineddata for English, Kannada, Marathi, and Hindi. The language string is configurable (`TESSERACT_LANGS`, default `eng+kan+mar+hin`). Word boxes from Tesseract are grouped into lines. Each line is a region with a pixel bounding box. Those boxes are the overlay on the page viewer.
+The researcher picks an engine in Settings (the default for the next upload) and can override it on a single upload. The choice is stored on the job. The page records which engine actually ran.
 
-Anuvaad's printed and handwriting models are an optional later engine for Indic pages, not the default. NLTM/Bhashini and Lipikar are the other Indic OCR projects to look at. There is no verified project under the name "IndicOCR"; that name is not used here.
+| Engine id | What the UI calls it | When it is used |
+|---|---|---|
+| `tesseract` | Free local OCR (Tesseract) | Default. No download, no key. English, Hindi, Marathi, Kannada traineddata are in the image |
+| `ppocr` | Free local OCR (PP-OCR) | Stronger on printed text. First use downloads ONNX weights into `DATA_DIR`. Falls back to Tesseract if the download or the runtime fails |
+| `claude` | Claude (needs a key) | Vision OCR. Disabled in the UI until a key is saved or present in the environment. If a job still asks for it with no key, the worker uses Tesseract and says so |
+| `gemini` | Gemini (needs a key) | Same rule as Claude |
 
-When `OCR_ENGINE` is `claude` or `gemini` and a key is set, the worker sends the page image through LiteLLM and reuses the v0.2 transcription prompt (exact spelling, `[illegible]` / `[word?]`, separate blocks for labels, handwriting, stamps, tables, figures, and marginalia). The prompt also asks for a normalised box per block so the overlay still has somewhere to land. If a box is missing, the block is placed in a vertical band in reading order. Vision OCR is skipped when no key is set; the worker uses Tesseract and records that it did so.
+### Why PP-OCR, and what was set aside
 
-Surya is not a default engine. Its weights are OpenRAIL-M and the licence limits commercial use above a revenue threshold. A Surya plug-in may be added later, off by default, for people who accept that licence.
+The free engine has to run on a CPU, inside Docker, on Apple Silicon (arm64) and on ordinary x86_64. It has to read old print and the scripts in these archives: English, Kannada, and Devanagari (Hindi and Marathi). The weights have to be something this Apache-2.0 project can ship a downloader for.
 
-Kraken is a possible later engine for handwritten lines. It is not required for v1.
+PP-OCRv4 recognition models, run through RapidOCR on ONNX Runtime, meet that. ONNX Runtime publishes arm64 and x86_64 wheels, so the image does not need PaddlePaddle (Paddle's own wheel is a poor fit for arm64). The models used are Apache-2.0, the same licence as RapidOCR and as this repository:
+
+- detector: multilingual PP-OCRv3 detection
+- English: `en_PP-OCRv4`
+- Hindi and Marathi: `devanagari_PP-OCRv4`
+- Kannada: `ka_PP-OCRv4`
+
+Detection runs once per script pass. For each line the engine keeps the reading with the higher confidence when the boxes overlap. Boxes are axis-aligned pixels on the same JPEG the viewer shows.
+
+PP-OCRv6's single "50 language" model is mostly Latin and CJK. It does not replace the script models above for Kannada or Devanagari, so v1.1 stays on the v4 script models.
+
+Weights are not baked into the image. The first PP-OCR job downloads them (on the order of 40 MB) into `DATA_DIR/models/ppocr` and the document's progress line says which file is downloading. Later pages reuse the files. ONNX Runtime itself is installed with the API image; that is the image-size cost, not the weights.
+
+These were looked at and not made the built-in engine:
+
+- **Surya** is strong on handwriting and on many languages, including Hindi. The code is Apache-2.0. The weights are a modified OpenRAIL-M licence: free under a funding or revenue cap (currently $5M) and paid above that. It also expects llama.cpp on CPU. It stays an optional plug-in, not a default.
+- **docTR** is Apache-2.0 and fine on CPU, but the shipped models are Latin. It would not read Kannada or Devanagari pages.
+- **TrOCR** is a handwriting model for English (MIT code). It is large for a CPU default and does not cover Indic scripts.
+- **Kraken** is right for some historical Latin hands, and it needs a model per script. Not in this release.
+- **Anuvaad**, **NLTM/Bhashini**, and **Lipikar** remain the Indic projects to watch. There is no verified project under the name "IndicOCR".
+
+Tesseract stays the lightweight fallback and the default, because it needs no download and already has the four language packs. PP-OCR is the choice when the page is printed and the user can wait for the first download. Neither free engine is reliable on difficult handwriting. That is what Claude or Gemini vision is for, with the user's own key.
+
+### Vision OCR
+
+When the engine is `claude` or `gemini` and a key is available, the worker sends the page image through LiteLLM and reuses the v0.2 transcription prompt (exact spelling, `[illegible]` / `[word?]`, separate blocks for labels, handwriting, stamps, tables, figures, and marginalia). The prompt also asks for a normalised box per block so the overlay still has somewhere to land. If a box is missing, the block is placed in a vertical band in reading order. The model id follows the saved provider, or `LLM_MODEL` when only the environment key is set. Gemini jobs use a Gemini model id even if the saved default is an Anthropic id, and the reverse for Claude.
 
 After OCR, the worker writes a short explanation of the document. With no model key this is extractive: the first lines of the transcription and the page count. With a key, a short model call writes the explanation and must quote the transcription rather than invent context.
 
@@ -157,7 +191,7 @@ A document has many notes. Each note is a text body and a timestamp. Notes are n
 
 Postgres. Identifiers are UUIDs. Timestamps are `timestamptz`.
 
-**documents.** id, filename, title, kind (`pdf` or `image`), status (`queued`, `processing`, `done`, `done_with_errors`, `failed`, `rejected`, `stopped`), page_count, selected_pages, language, explanation, error, source_path, created_at.
+**documents.** id, filename, title, kind (`pdf` or `image`), status (`queued`, `processing`, `done`, `done_with_errors`, `failed`, `rejected`, `stopped`), page_count, selected_pages, language, collection (a short label the user types, used as a search filter), ocr_engine (the engine requested for this document), progress (a short status line while a model is downloading or a page is being read), explanation, error, source_path, created_at.
 
 **pages.** id, document_id, number, status (`skipped`, `pending`, `done`, `failed`), image_path, width, height, text, translation, translation_language, ocr_engine, language, confidence, flagged, uncertain, edited, error. A generated `tsv` (`to_tsvector('simple', text)`) with a GIN index.
 
@@ -190,6 +224,12 @@ Failed jobs with attempts left are requeued with a short delay. A job that hits 
 
 **library_cache.** connector, query, payload (jsonb), fetched_at. Primary key (connector, query).
 
+**app_settings.** key, value. Holds the saved model provider, model id, optional API base, the saved API key, and the default OCR engine. The key is stored only in this local database. It is never written to the log and never sent back to the browser in full.
+
+**access_entries.** id, kind (`email` or `domain`), value (lower case), is_admin, source (`env` or `local`), created_at. Unique on (kind, value).
+
+**sessions.** id, token_hash, email, is_admin, expires_at, created_at. The cookie stores the raw token. The database stores its hash.
+
 Schema changes go through Alembic. The API runs `upgrade head` on startup.
 
 Files live under `DATA_DIR` (`/data` in Compose): `documents/{id}/source.*` and `documents/{id}/page_0001.jpg`. The database stores paths. `data/` is gitignored.
@@ -200,7 +240,20 @@ Prefix `/api`. No `/api/v1` prefix in this release; the v0.2 routes were a proto
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/api/health` | Database up, OCR engine, whether a model key is set, embedding provider |
+| GET | `/api/health` | Database up, default OCR engine, whether a model key is set, embedding provider, whether sign-in is disabled. No session required |
+| GET | `/api/auth/login` | Redirect to Google. No session required |
+| GET | `/api/auth/callback` | Google redirects here. Sets the session cookie or sends the browser to the refusal page |
+| POST | `/api/auth/logout` | Clears the session cookie |
+| GET | `/api/auth/me` | `{authenticated, auth_disabled, email, is_admin}` |
+| GET | `/api/settings` | Masked key, provider, model, base, default engine, whether the environment key is the one in use. Any signed-in user |
+| PUT | `/api/settings` | Save provider, model, base, key, default engine. Admin only. Takes effect on the next job, no restart |
+| POST | `/api/settings/test` | Sends a tiny prompt with the pasted or saved key. Returns ok or a short error. Does not log the key. Admin only |
+| DELETE | `/api/settings/key` | Removes the saved key. The environment key, if any, is used again. Admin only |
+| GET | `/api/access` | Allowlist. Admin only |
+| POST | `/api/access` | `{kind: email\|domain, value, is_admin}`. Admin only |
+| DELETE | `/api/access/{id}` | Remove one entry. Cannot remove the last admin. Admin only |
+| GET | `/api/ocr/models` | PP-OCR download status: `missing`, `downloading`, `ready`, or `error`, plus a short message |
+| PATCH | `/api/documents/{id}` | `{collection, language, title}` |
 | POST | `/api/documents` | Multipart `files[]`, optional form field `options` (JSON: `pages`, `pages_by_file`, `force_ocr`, `ocr_engine`) |
 | GET | `/api/documents` | List, newest first |
 | GET | `/api/documents/{id}` | Document, pages (without image bytes), regions, notes count, latest jobs |
@@ -217,7 +270,7 @@ Prefix `/api`. No `/api/v1` prefix in this release; the v0.2 routes were a proto
 | POST | `/api/documents/{id}/ask` | `{question}` → `{message_id, job_id}` |
 | POST | `/api/documents/{id}/translate` | `{language}` → `{job_id}` |
 | GET | `/api/documents/{id}/export?format=` | `docx`, `md`, `json`, `bibtex`, `tei`, `txt`, `pdf` |
-| GET | `/api/search?q=` | Hybrid search across documents. Optional `document_id` |
+| GET | `/api/search?q=` | Hybrid search across transcriptions, plus full-text over translations and notes. Optional `document_id`, `collection`, `language`, `engine`, `uploaded_from`, `uploaded_to` (ISO dates). Each hit has `kind` (`transcription`, `translation`, `note`), `snippet` (the query wrapped in `<mark>`), `page`, and `region_id` when the hit is a line |
 | GET | `/api/library/search?q=&sources=` | `sources` is a comma list. Default: the four no-key connectors plus Gallica |
 | GET | `/api/jobs/{id}` | Job status and result |
 
@@ -229,36 +282,75 @@ The searchable PDF is the v0.2 behaviour: the page image plus an invisible text 
 
 ## 12. Interface
 
-One Next.js app. Two views, switched from the header: **Workspace** and **Library search**.
+One Next.js app. The header holds the name, a search field, the view switch, the interface language, light or dark, and Settings. The views are **Workspace**, **Library search**, and **Settings**.
+
+The audience is a historian or archaeologist who should not have to learn the machinery. Labels are short. Technical words have a one-line tooltip. Empty states say what to do next. Errors say what went wrong in a sentence, not a stack trace. A first-run note, shown once, walks through upload, wait for OCR, ask, and export.
+
+### Search
+
+Two different searches, labeled so they are not confused.
+
+**Search your documents** is the field in the header, and it also opens with Ctrl-K or Cmd-K. It runs the hybrid search over transcriptions and full-text over translations and notes. Filters: collection, language, date uploaded (any time, past week, past month), and OCR engine. A result shows the document name, the page, the kind of hit, and a snippet with the words marked. Choosing a result opens that document, turns to the page, and highlights the region.
+
+**Find in this document** is a separate field on the page pane (also Ctrl-F or Cmd-F while the workspace is open). It highlights matching lines in the transcription and on the page image. It does not call the library catalogues.
+
+**Search open libraries** stays its own view. The header calls it that, not "Search".
 
 ### Workspace
 
-Three panes, left to right.
+Three panes, left to right. Each side pane can be collapsed. The dividers can be dragged. Widths are remembered in the browser.
 
-**Library.** The documents on this machine. Each row shows the filename, status, and page count. An upload control (button and drag-and-drop) adds files. A page-range field applies to the next upload. Selecting a document loads it in the other two panes. Status text is plain: queued, reading, done, failed.
+**Library.** The documents on this machine. Each row shows the filename, status, and page count. An upload control (button and drag-and-drop) adds files. A page-range field applies to the next upload. An engine menu applies to the next upload: free engines are always available; Claude and Gemini are disabled, with a hint, until a key is saved. A collection field and a document-language field are stored on the selected document and used by search filters. Selecting a document loads it in the other two panes. Status text is plain: queued, reading, done, failed. While PP-OCR weights download, the status line names the file.
 
-**Page.** OpenSeadragon. Previous and next page, and a page field. OCR regions are drawn as boxes over the image. The box for the citation the user last clicked stays highlighted. A button toggles the overlay. The transcription for the current page sits under the image (or beside it when the window is wide): one block per region, in order. Low-confidence lines are marked. The explanation sits at the top of this pane in two or three sentences.
+**Page.** OpenSeadragon. Previous and next page, and a page field. OCR regions are drawn as boxes over the image. The box for the citation the user last clicked stays highlighted, and so do lines that match Find. A button toggles the overlay. The transcription for the current page sits under the image: one block per region, in order. Low-confidence lines are marked. The explanation sits at the top of this pane in two or three sentences.
 
-**Chat.** The question field, the thread, and the notes. Assistant messages render `[n]` as buttons. A document citation moves the viewer to that page and region. A library citation is a link that opens in a new tab. Notes are a list with an add box.
+**Chat.** The question field, the thread, and the notes. Assistant messages render `[n]` as buttons. A document citation moves the viewer to that page and region. A library citation is a link that opens in a new tab. Notes are a list with an add box. The translation control is a language menu (Hindi, Kannada, Marathi, Tamil, Telugu, Bengali, and a free-text code), separate from the interface language.
 
-The panes have landmarks (`nav`, `main`, the chat as a complementary region). Every control has a visible name. Focus is visible. Text and the paper background meet WCAG AA contrast. The layout stacks vertically under 960px wide: library, page, chat.
+The panes have landmarks (`nav`, `main`, the chat as a complementary region). Every control has a visible name. Focus is visible. The layout stacks vertically under 960px wide: library, page, chat. Dividers hide at that width.
 
 ### Library search
 
-A query box, checkboxes for each connector, and a result list: title, source, date, creators, a short description, and the URL. A source that is not configured (Europeana, DPLA without a key) is shown as such, not as an empty result. Errors from one source do not hide the others.
+A query box, checkboxes for each connector, and a result list: title, source, date, creators, a short description, and the URL. A source that is not configured (Europeana, DPLA without a key) is shown as such, not as an empty result. Errors from one source do not hide the others. The view's title is "Search open libraries".
+
+### Settings
+
+**Model key.** Provider (Anthropic, Google Gemini, OpenAI, or an OpenAI-compatible base URL), model id, optional base URL, and the key. Save, Test, and Clear. After save the field shows a mask such as `sk-…ab12` and never the full key. Clear removes the saved key. If `.env` still has `LLM_API_KEY`, the page says the environment key is in use. Only an admin can change this. With sign-in turned off, the local user is treated as the admin.
+
+**OCR default.** The same four engines as the upload menu. This is the default for new uploads.
+
+**Access.** With sign-in turned on, an admin sees the allowlist and can add or remove an email or a domain. Entries that came from the environment are marked and are put back on the next startup if they are missing. The last admin cannot be removed. With sign-in turned off, the page says so and does not pretend there is an account.
+
+### Sign-in and refusal
+
+`/login` has one action: Sign in with Google. `/access-denied` says, in a sentence, that this Google account is not on the list, and it shows the email. It does not set a session.
+
+### Languages
+
+Interface strings live in one catalogue per language: English, Hindi, Kannada, Marathi, Tamil, Telugu, Bengali. The switcher is in the header. The choice is stored in the browser. The document font follows the script: Noto Sans for Latin, Noto Sans Devanagari for Hindi and Marathi, Noto Sans Kannada, Noto Sans Tamil, Noto Sans Telugu, Noto Sans Bengali. This is not the translation language of a document.
 
 ### Look
 
-Quiet. Off-white paper, near-black ink, a single dark-red accent for the current selection and for citation buttons. Serif for the document title and the transcription, sans-serif for the chrome. No dashboard cards, no gradient hero, no marketing slogans on the working screen. The header is the name "Archive Workbench" and the two views.
+Parchment and seal ink, in light and dark.
+
+| Token | Light | Dark |
+|---|---|---|
+| Page background | `#f4efe6` | `#141210` |
+| Surface | `#fffdf8` | `#221f1b` |
+| Ink | `#1c1915` | `#f4efe6` |
+| Muted ink | `#5c564c` | `#c4bbaa` |
+| Seal (accent) | `#7c2f27` | `#e7b2a8` for text, `#9a3e34` for buttons with white text |
+| Line | `#e4d9c8` | `#3a342c` |
+
+Serif for the transcription. Sans for the chrome. No dashboard cards, no gradient hero, no marketing slogans on the working screen. Text on parchment and text on the dark surface meet WCAG AA. Focus is a 2px ink outline. The theme follows the operating system until the user picks light or dark, and that choice is remembered.
 
 ## 13. Non-functional requirements
 
 | Area | Requirement |
 |---|---|
-| Privacy | Originals, page images, transcriptions, notes, and chats stay in local Postgres and `DATA_DIR`. Keys live in `.env` or the environment, never in the database, never in the UI after save, never in logs. The health endpoint reports only whether a key is set |
+| Privacy | Originals, page images, transcriptions, notes, and chats stay in local Postgres and `DATA_DIR`. A model key saved in Settings is stored in the local `app_settings` table only. The API returns a mask, not the key. Keys are not logged. `LLM_API_KEY` in `.env` still works when no key is saved. The health endpoint reports only whether a key is set |
 | Local only | With no `LLM_API_KEY`, OCR is Tesseract, answers are extractive, translation is the mock banner. No call is made to a model vendor |
 | Leaving the machine | Vision OCR, model answers, model translation, and API embeddings send data out. The health endpoint shows the mode. Library search sends the query only, not the document |
-| Auth | Optional `APP_PASSWORD` (HTTP basic), as in v0.2. No accounts, no SSO in v1 |
+| Auth | Google sign-in (OpenID Connect). Session cookie is HTTP-only, `SameSite=Lax`, `Secure` when the base URL is https, and lasts 14 days. Every API route except health and the auth routes requires a session. The web app redirects to `/login` when there is no session. `AUTH_DISABLED=true` skips all of this and logs a warning; that is the default in `.env.example` so a new local install still opens. Allowlist: `ALLOWED_EMAILS`, `ALLOWED_DOMAINS`, and `ADMIN_EMAILS` (default `praveenmaths89@gmail.com`). An admin can add and remove entries without a restart. Environment entries are re-inserted on startup if they are missing |
 | Retention | No automatic deletion. The user deletes a document when they want it gone |
 | Accessibility | WCAG 2.1 AA for the chrome and the transcription. The page image has a text alternative (the transcription) |
 | Performance | A two-page scan finishes OCR without a model in well under a minute on a laptop, not counting the first embedding-model download. Library search returns or fails per source within 20 seconds |
@@ -276,15 +368,24 @@ See `.env.example`. The names that matter:
 | `LLM_API_KEY` | empty | Any key LiteLLM will accept for `LLM_MODEL` |
 | `LLM_MODEL` | `anthropic/claude-sonnet-4-5` | LiteLLM model id. Examples: `gemini/gemini-2.0-flash`, `openai/gpt-4o-mini`, `ollama/llama3.2` |
 | `LLM_API_BASE` | empty | For Ollama or a proxy |
-| `OCR_ENGINE` | `tesseract` | `tesseract`, `claude`, or `gemini` |
+| `OCR_ENGINE` | `tesseract` | Default engine when Settings has not saved one: `tesseract`, `ppocr`, `claude`, or `gemini` |
 | `TESSERACT_LANGS` | `eng+kan+mar+hin` | Passed to Tesseract |
 | `EMBEDDING_PROVIDER` | `local` | `local`, `api`, or `hash` |
 | `EMBEDDING_MODEL` | `intfloat/multilingual-e5-small` | Local model name, or the API model when provider is `api` |
 | `EUROPEANA_API_KEY` | empty | Europeana |
 | `DPLA_API_KEY` | empty | DPLA |
-| `APP_PASSWORD` | empty | Optional basic auth |
+| `AUTH_DISABLED` | `true` in `.env.example` | `true` skips Google sign-in and logs a warning |
+| `GOOGLE_CLIENT_ID` | empty | OAuth client id |
+| `GOOGLE_CLIENT_SECRET` | empty | OAuth client secret |
+| `AUTH_SECRET` | empty | Signs the OAuth `state` cookie. Generated into `DATA_DIR` if empty |
+| `APP_BASE_URL` | `http://localhost:3000` | Public origin. Redirect URI is `{APP_BASE_URL}/api/auth/callback` |
+| `ALLOWED_EMAILS` | empty | Comma-separated emails that may sign in |
+| `ALLOWED_DOMAINS` | empty | Comma-separated domains, such as `university.ac.in` |
+| `ADMIN_EMAILS` | `praveenmaths89@gmail.com` | Admins. May change keys and the allowlist |
 
-`ANTHROPIC_API_KEY` is still read if `LLM_API_KEY` is empty, so a v0.2 `.env` keeps working.
+`ANTHROPIC_API_KEY` is still read if `LLM_API_KEY` is empty, so a v0.2 `.env` keeps working. A key saved in Settings wins over both.
+
+The Google client is created in Google Cloud Console: APIs & Services → OAuth consent screen (External is fine for a test, add the allowlisted Gmail addresses as test users while the app is in testing), then Credentials → OAuth client ID → Web application. Authorised JavaScript origins: `http://localhost:3000` and, later, `https://<your-domain>`. Authorised redirect URIs: `http://localhost:3000/api/auth/callback` and `https://<your-domain>/api/auth/callback`. Copy the client id and secret into `.env`. Set `AUTH_DISABLED=false` and restart once so the new environment is read. After that, allowlist edits do not need a restart.
 
 ## 15. Repository layout
 
@@ -318,11 +419,16 @@ A fresh clone, with Docker Desktop on an Apple Silicon Mac, passes the following
 9. Export DOCX, Markdown, JSON, BibTeX, and TEI. DOCX opens as a zip (`PK` magic). TEI is well-formed XML.
 10. `pytest` passes against the Compose database.
 11. No PDF, no `data/`, and no `.env` are in git.
+12. Settings saves a key, the following GET shows only a mask, Test reports success or a short error, and Clear removes the saved key. The next job sees the change without a restart.
+13. An upload or a re-run can name `ocr_engine`. `claude` or `gemini` with no key is recorded as Tesseract. `ppocr` is offered as a free engine and falls back to Tesseract if its weights cannot be loaded.
+14. With `AUTH_DISABLED=true`, the workspace loads with no Google account. With sign-in on, an allowlisted email gets a session and any other email is sent to the refusal page.
+15. Search for a word in a transcription returns that document, page, and region. The library view is still a separate catalogue search.
+16. The interface language can be switched, and light and dark both meet the contrast tokens above.
 
 ## 17. Tests
 
-- pytest for page ranges, export, the verifier, connector parsing (HTTP mocked), the queue claim (SKIP LOCKED), hybrid search, and the upload → OCR → ask → export path. OCR in that path uses Tesseract on a small synthetic image, or the sample minute paper when it is present outside the repo.
-- A Playwright smoke test loads the workspace, checks the three panes and the library view, and does not require a model key.
+- pytest for page ranges, export, the verifier, connector parsing (HTTP mocked), the queue claim (SKIP LOCKED), hybrid search, settings (mask, clear, admin), Google sign-in with the token exchange mocked (allowlisted email in, other email refused), and the upload → OCR → ask → export path. OCR in that path uses Tesseract on a small synthetic image, or the sample minute paper when it is present outside the repo. PP-OCR box merging is tested without downloading weights.
+- A Playwright smoke test loads the workspace, checks the three panes, opens document search, switches the interface to Hindi, toggles dark mode, and opens the library view. It does not require a model key or a Google client. `AUTH_DISABLED` stays true for that run.
 
 ## 18. How to run
 
@@ -337,7 +443,8 @@ The first local embedding run downloads `multilingual-e5-small` (a few hundred m
 - The HathiTrust Data API was retired in 2024. Do not integrate it.
 - NDLI and the Indian Culture portal have no public API.
 - "IndicOCR" is not a verified project name. Indic OCR options to track are NLTM/Bhashini, Lipikar, and Anuvaad.
-- Surya's weights are OpenRAIL-M with a revenue limit. Optional plug-in only, not a default and not shipped in v1.
+- Surya's weights are a modified OpenRAIL-M licence with a funding and revenue cap (currently $5M). The code is Apache-2.0. Optional plug-in only, not a default and not shipped in v1.1.
+- PP-OCRv6's unified model does not cover Kannada or Devanagari. The built-in neural engine uses the Apache-2.0 PP-OCRv4 script models through ONNX Runtime.
 
 ## 20. v2 roadmap
 
@@ -353,10 +460,10 @@ Not scheduled, and not required for the acceptance criteria above.
 - Surya as an opt-in OCR plug-in
 - Mirador and IIIF, for manifests from libraries that publish them
 - Timeline and map views of entities
-- SSO and accounts
+- Further sign-in providers beyond Google
 - Azure deployment: Container Apps, Azure Database for PostgreSQL, Blob storage, Key Vault
 - Modi script OCR
 
 ## 21. Out of scope for v1
 
-Real-time camera OCR, training models, a mobile app, per-user accounts, automatic threshold tuning, word-aligned PDF text layers, and editing the scan itself.
+Real-time camera OCR, training models, a mobile app, automatic threshold tuning, word-aligned PDF text layers, and editing the scan itself. Google is the only sign-in provider in this release.
