@@ -1,0 +1,12 @@
+anthropic>=0.40
+fastapi
+uvicorn
+httpx
+numpy
+opencv-python-headless
+pillow
+pydantic>=2
+pydantic-settings
+pymupdf
+python-docx
+python-multipart
