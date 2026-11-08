@@ -117,7 +117,11 @@ const save=()=>{try{localStorage.setItem('jobs',JSON.stringify(jobs.slice(0,15))
 function applyMeta(m){const e=$('#mode'),lead=$('#lead'),on=!!m.research_enabled;
  $('#ask').hidden=!on;const tab=document.querySelector('.tab[data-t="rs"]');if(tab)tab.hidden=!on;
  if(!on&&state.tab==='rs'&&typeof showTab==='function')showTab('tr');
- if(m.mode==='local'){e.textContent='Local OCR · this browser session only';e.className='';
+ if(m.hosted&&m.mode==='unavailable'){e.textContent='Server API key is not configured';e.className='warn';
+  if(lead)lead.textContent='Scan transcription and web search are unavailable until the server Anthropic key is set. Placeholder text is not returned.';}
+ else if(m.hosted){e.textContent='Claude · this browser session only';e.className='';
+  if(lead)lead.textContent='Scans are transcribed with Claude, and web search uses the transcript. Only this browser can open what you upload.';}
+ else if(m.mode==='local'){e.textContent='Local OCR · this browser session only';e.className='';
   if(lead)lead.textContent='Pages are transcribed on this server with Tesseract. Only this browser can open them, and they are deleted within 24 hours. Web research is off, so no shared API key is used.';}
  else if(m.mode==='mock'){e.textContent='Mock mode: no API key, placeholder text';e.className='warn';
   if(lead)lead.textContent='Mock mode is on, so transcription is a placeholder. A personal API key is required for Claude, and it is not used by the public edition.';}

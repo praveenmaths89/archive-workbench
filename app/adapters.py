@@ -106,6 +106,19 @@ class EngineMissing(RuntimeError):
     """The local OCR binary is not installed. Every page would fail the same way."""
 
 
+class NeedsApiKey(RuntimeError):
+    """Hosted OCR was asked to run without the server key. Not a mock transcription."""
+
+
+class UnavailableAdapter:
+    """Fails closed. A hosted server must not invent a transcription when no key is set."""
+
+    def ocr(self, jpeg_bytes: bytes, model: str, hints: dict) -> OcrResult:
+        raise NeedsApiKey(
+            "The server Anthropic API key is not configured, so this page was not sent for transcription."
+        )
+
+
 def blocks_from_tsv(tsv: str) -> tuple[list[Block], float]:
     """Group a Tesseract TSV into paragraph blocks. Confidence is the mean word score, 0..1."""
     lines = [ln for ln in tsv.splitlines() if ln.strip()]
@@ -198,7 +211,13 @@ class MockAdapter:
 
 
 def get_adapter() -> OcrAdapter:
-    # A public server never constructs the paid client, even if a key is present in the environment.
+    # Hosted mode keeps Claude OCR on the single server key. It does not accept a visitor key
+    # and it does not pretend a mock transcription is a result.
+    if settings.hosted_mode:
+        if not settings.anthropic_api_key:
+            return UnavailableAdapter()
+        return ClaudeAdapter()
+    # PUBLIC_MODE never constructs the paid client, even if a key is present in the environment.
     if settings.public_mode:
         if settings.use_mock or settings.ocr_engine.lower() == "mock":
             return MockAdapter()

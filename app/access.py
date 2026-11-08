@@ -28,21 +28,27 @@ COOKIE = "aw_session"
 ID_RE = re.compile(r"^[a-f0-9]{12}$")
 VISITOR_RE = re.compile(r"^[a-f0-9]{32}$")
 _SAFE = re.compile(r"[^A-Za-z0-9._-]+")
+_KEY_IN_TEXT = re.compile(r"sk-ant-[A-Za-z0-9_\-]{6,}")
 _SECRET_LOCK = threading.Lock()
 _SECRETS: dict[str, bytes] = {}
 SENSITIVE_KEYS = {"api_key", "anthropic_api_key", "token", "password", "authorization", "secret"}
 
 
-def assert_safe_host(password: str = "") -> None:
-    """A platform-assigned PORT means this process is reachable beyond one laptop.
+def redact(text: str) -> str:
+    """Remove the server API key from anything that might be stored or returned."""
+    secret = settings.anthropic_api_key or ""
+    if secret and len(secret) >= 8:
+        text = text.replace(secret, "[redacted]")
+    return _KEY_IN_TEXT.sub("[redacted]", text)
 
-    Boot only in the locked-down public mode, or behind the existing shared password.
-    """
-    if os.environ.get("PORT") and not settings.public_mode and not password:
+
+def assert_safe_host(password: str = "") -> None:
+    """A platform-assigned PORT means this process is reachable beyond one laptop."""
+    if os.environ.get("PORT") and not settings.shared and not password:
         raise RuntimeError(
-            "Refusing to start: PORT is set, PUBLIC_MODE is off, and APP_PASSWORD is empty. "
-            "Set PUBLIC_MODE=1 for the shared server (it will not use ANTHROPIC_API_KEY), "
-            "or set APP_PASSWORD for a private server."
+            "Refusing to start: PORT is set, neither HOSTED_MODE nor PUBLIC_MODE is on, "
+            "and APP_PASSWORD is empty. Set HOSTED_MODE=1 for the full shared server, "
+            "PUBLIC_MODE=1 for local OCR only, or APP_PASSWORD for a private server."
         )
 
 
@@ -150,7 +156,7 @@ def require_job(job_id: str, visitor: str | None):
     job, docs = store.get_job(job_id)
     if not job:
         raise HTTPException(404, "job not found")
-    if settings.public_mode and not same_id(job.get("visitor_id"), visitor):
+    if settings.shared and not same_id(job.get("visitor_id"), visitor):
         raise HTTPException(404, "job not found")
     return job, docs
 
@@ -179,7 +185,7 @@ def pages_remaining(visitor: str) -> int:
 
 
 def enforce_new_job(visitor: str | None) -> None:
-    if not settings.public_mode:
+    if not settings.shared:
         return
     if not visitor:
         raise HTTPException(403, "This public server could not start a private session.")
@@ -206,7 +212,7 @@ def delete_job_files(job_id: str) -> None:
 
 def purge_expired() -> None:
     """Remove aged visitor uploads. Jobs with no visitor id are personal data and are kept."""
-    if not settings.public_mode:
+    if not settings.shared:
         return
     cutoff = datetime.now(timezone.utc) - timedelta(hours=settings.public_retention_hours)
     for job_id, created, visitor_id in store.iter_jobs():
@@ -244,7 +250,7 @@ class SecurityMiddleware:
             return
         request = Request(scope, receive)
         minted = None
-        if settings.public_mode:
+        if settings.shared:
             visitor = parse_token(request.cookies.get(COOKIE))
             if visitor is None:
                 minted = mint_token()
