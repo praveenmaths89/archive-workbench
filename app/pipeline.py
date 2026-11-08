@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 from typing import Callable, Optional
 
-from .adapters import OcrAdapter
+from .adapters import EngineMissing, OcrAdapter
 from .config import settings
 from .ingest import iter_pages, to_jpeg
 from .ir import Block, DocumentIR, Page
@@ -20,6 +20,8 @@ class FatalProviderError(RuntimeError):
 
 
 def fatal_message(e: Exception) -> str | None:
+    if isinstance(e, EngineMissing):
+        return str(e)
     text = str(e).lower()
     if "credit balance is too low" in text:
         return ("Your Anthropic credit balance is too low. Add credits at console.anthropic.com "
@@ -67,6 +69,8 @@ def process_page(adapter: OcrAdapter, number: int, img, text_layer: str, out_dir
         return page
 
     jpeg = to_jpeg(img, max_edge=settings.api_image_max_edge)
+    if settings.public_mode:
+        pin_model = None
     if pin_model:
         routing.model, routing.reasons = pin_model, routing.reasons + ["model pinned by user"]
     while True:
@@ -77,13 +81,14 @@ def process_page(adapter: OcrAdapter, number: int, img, text_layer: str, out_dir
             if fatal:
                 raise FatalProviderError(fatal) from e
             log.exception("OCR failed on page %s", number)
-            page.status, page.error = "failed", f"{type(e).__name__}: {e}"
+            page.status = "failed"
+            page.error = "This page could not be read." if settings.public_mode else f"{type(e).__name__}: {e}"
             return page
         page.blocks, page.language, page.confidence = res.blocks, res.language, res.confidence
         page.input_tokens += res.input_tokens
         page.output_tokens += res.output_tokens
         page.routing = routing
-        if page.confidence >= settings.escalation_threshold or pin_model:
+        if page.confidence >= settings.escalation_threshold or pin_model or routing.model == "tesseract":
             break
         nxt = next_tier(routing)
         if nxt is None:

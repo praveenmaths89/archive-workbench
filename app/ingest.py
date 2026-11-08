@@ -12,6 +12,8 @@ from PIL import Image, ImageSequence
 
 from .config import settings
 
+Image.MAX_IMAGE_PIXELS = 25_000_000
+
 MAGIC = [
     (b"%PDF", "pdf"),
     (b"\x89PNG\r\n\x1a\n", "image"),
@@ -35,14 +37,27 @@ def detect_kind(path: Path) -> str:
     raise IngestError("unsupported or corrupt file type")
 
 
+def _matrix(page) -> "pymupdf.Matrix":
+    zoom = settings.render_dpi / 72
+    edge = max(float(page.rect.width), float(page.rect.height)) * zoom
+    cap = settings.max_render_edge
+    if edge > cap > 0:
+        zoom *= cap / edge
+    return pymupdf.Matrix(zoom, zoom)
+
+
 def page_count(path: Path, kind: str) -> int:
     if kind == "pdf":
         with pymupdf.open(path) as doc:
             if doc.needs_pass:
                 raise IngestError("PDF is password-protected")
             return doc.page_count
-    with Image.open(path) as im:
-        return getattr(im, "n_frames", 1)
+    try:
+        with Image.open(path) as im:
+            im.load()
+            return getattr(im, "n_frames", 1)
+    except Image.DecompressionBombError as e:
+        raise IngestError("image is too large") from e
 
 
 def _pix_to_bgr(pix: "pymupdf.Pixmap") -> np.ndarray:
@@ -60,11 +75,10 @@ def iter_pages(path: Path, kind: str, only: set[int] | None = None) -> Iterator[
     With `only`, pages outside the set are never rendered."""
     if kind == "pdf":
         with pymupdf.open(path) as doc:
-            zoom = settings.render_dpi / 72
             for i in sorted(only) if only else range(1, doc.page_count + 1):
                 page = doc[i - 1]
                 text = page.get_text("text").strip()
-                pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), alpha=False)
+                pix = page.get_pixmap(matrix=_matrix(page), alpha=False)
                 yield i, _pix_to_bgr(pix), text
     else:
         with Image.open(path) as im:
@@ -91,8 +105,7 @@ def get_page(path: Path, kind: str, number: int) -> tuple[np.ndarray, str]:
     if kind == "pdf":
         with pymupdf.open(path) as doc:
             page = doc[number - 1]
-            zoom = settings.render_dpi / 72
-            pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), alpha=False)
+            pix = page.get_pixmap(matrix=_matrix(page), alpha=False)
             return _pix_to_bgr(pix), page.get_text("text").strip()
     with Image.open(path) as im:
         im.seek(number - 1)

@@ -84,11 +84,12 @@ button.stop{border-color:var(--bad);color:var(--bad)}button.go{background:var(--
   <header><h1>Archive OCR <span class="sm" style="font-weight:400">v0.3</span></h1><div id="mode">&nbsp;</div></header>
   <div id="drop" tabindex="0">Drop PDFs or images here<br><span class="sm">or click to choose (multiple allowed)</span>
     <input id="file" type="file" multiple hidden accept=".pdf,.png,.jpg,.jpeg,.tif,.tiff,.webp"></div>
+  <p id="limits" class="sm" hidden style="margin:0 12px 8px"></p>
   <div id="stage" hidden></div>
   <div id="list"></div>
 </aside>
 <main>
-  <div id="empty"><p style="font:1.1rem var(--serif)">Upload a document to begin</p><p class="sm">Pages are transcribed with Claude. Then review them beside the original, export, or research the context on the web.</p>
+  <div id="empty"><p style="font:1.1rem var(--serif)">Upload a document to begin</p><p class="sm" id="lead">Upload a page or PDF, review the transcription beside the original, and export it.</p>
   <p class="sm"><b>Already uploaded something?</b> Click it in the list on the left. The question box (“Ask about this document”) and the OCR controls appear at the top once a document is selected.</p></div>
   <div id="doc" hidden style="display:none;flex-direction:column;min-height:0;flex:1">
     <div id="head"><h2 id="title"></h2><span id="dl"></span></div>
@@ -113,8 +114,17 @@ let jobs=[];try{jobs=JSON.parse(localStorage.getItem('jobs')||'[]')}catch(e){}
 let state={job:null,doc:null,page:1,detail:null,docs:{},edit:false,tab:'tr',rid:null,pollR:null};
 const save=()=>{try{localStorage.setItem('jobs',JSON.stringify(jobs.slice(0,15)))}catch(e){}};
 
-fetch(API+'/models').then(r=>r.json()).then(m=>{const e=$('#mode');
- if(m.mode==='mock'){e.textContent='⚠ Mock mode: no API key, placeholder text';e.className='warn'}else e.textContent='Claude connected'});
+function applyMeta(m){const e=$('#mode'),lead=$('#lead'),on=!!m.research_enabled;
+ $('#ask').hidden=!on;const tab=document.querySelector('.tab[data-t="rs"]');if(tab)tab.hidden=!on;
+ if(!on&&state.tab==='rs'&&typeof showTab==='function')showTab('tr');
+ if(m.mode==='local'){e.textContent='Local OCR · this browser session only';e.className='';
+  if(lead)lead.textContent='Pages are transcribed on this server with Tesseract. Only this browser can open them, and they are deleted within 24 hours. Web research is off, so no shared API key is used.';}
+ else if(m.mode==='mock'){e.textContent='Mock mode: no API key, placeholder text';e.className='warn';
+  if(lead)lead.textContent='Mock mode is on, so transcription is a placeholder. A personal API key is required for Claude, and it is not used by the public edition.';}
+ else{e.textContent='Claude connected';e.className='';
+  if(lead)lead.textContent='Pages are transcribed with Claude. Then review them beside the original, export, or research the context on the web.';}
+ const lim=$('#limits');if(lim){if(m.limits){lim.hidden=false;lim.textContent=`Up to ${m.limits.files} files, ${m.limits.file_mb} MB and ${m.limits.pages} pages each.`;}else lim.hidden=true;}}
+fetch(API+'/models').then(r=>r.json()).then(applyMeta).catch(()=>{});
 
 /* ---------- upload + library ---------- */
 const drop=$('#drop'),inp=$('#file');
@@ -144,7 +154,7 @@ async function startOcr(pages){const d=state.docs[state.doc];
  const r=await fetch(`${API}/jobs/${d.job}/documents/${d.id}/ocr`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pages:pages??$('#pgs').value.trim()})});
  if(!r.ok){let m=await r.text();try{m=JSON.parse(m).detail}catch(e){}toast(m);return}
  const j=await r.json();if(j.status==='nothing_to_do')toast('Those pages are already done.');$('#pgs').value='';refresh()}
-function toast(m){const e=$('#mode');e.textContent=m;e.className='warn';setTimeout(()=>fetch(API+'/models').then(r=>r.json()).then(x=>{e.textContent=x.mode==='mock'?'⚠ Mock mode':'Claude connected';e.className=x.mode==='mock'?'warn':''}),5000)}
+function toast(m){const e=$('#mode');e.textContent=m;e.className='warn';setTimeout(()=>fetch(API+'/models').then(r=>r.json()).then(applyMeta).catch(()=>{}),5000)}
 async function refresh(){
  const all=[];for(const id of jobs){try{const r=await fetch(`${API}/jobs/${id}`);if(r.ok){const j=await r.json();j.documents.forEach(d=>all.push({...d,job:id}))}}catch(e){}}
  state.docs=Object.fromEntries(all.map(d=>[d.id,d]));

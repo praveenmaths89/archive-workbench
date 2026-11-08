@@ -4,14 +4,30 @@ Archive Workbench is a tool for reading scanned historical documents. You upload
 
 ## Status
 
-This repository is a working prototype. The version on `main` uses a commercial vision language model (Anthropic Claude) for OCR and research. That is fine for personal use with your own API key, but it is not open enough for shared research infrastructure. The plan is to move the default path to free, local engines (Tesseract and PP-OCR) and keep commercial models as an optional choice when you supply your own key. A fuller local-first design lives on the `cursor/archive-workbench-v1-9d5b` branch.
+The personal server on `main` can use Anthropic Claude for OCR and research when you set your own API key. That key is for your own machine. The public edition does not use it.
+
+## Public edition
+
+Anyone can open the public edition without an account. Transcription runs in the visitor's browser with Tesseract (English, Portuguese, or Kannada). A born-digital PDF keeps its text layer. The visitor can correct the text and download TXT, Markdown, JSON, or DOCX.
+
+Documents are not uploaded and are not stored on the server. There is no shared history, no admin view, and no web research, because research would send text to a paid API. Refreshing the tab clears the session. Limits are 3 files, 8 MB each, and 5 pages each. TIFF is not decoded in the browser; use PDF, PNG, JPEG, or WebP.
+
+The site is the `docs/` directory. `.github/workflows/pages.yml` publishes it on each push to `main`, which is what produces https://praveenmaths89.github.io/archive-workbench/. Creating the Pages site from this environment returns HTTP 403, "Resource not accessible by integration," so that address is not serving the app until the workflow run on `main` succeeds. The first run can also wait for a repository admin to approve the `github-pages` environment.
+
+## Personal server
+
+Leave `PUBLIC_MODE` unset. With `ANTHROPIC_API_KEY` set, OCR and web research use your key. Without a key, the server stays in mock mode. Do not put that key on a server that strangers can reach.
+
+`PUBLIC_MODE=1` is the locked-down server mode: local Tesseract only, the configured API key is ignored, web research is off, and each browser can open only its own uploads. Those uploads expire after 24 hours. Jobs created without a visitor session, including an existing personal archive, are not listed and are not deleted. If a host sets `PORT` and neither `PUBLIC_MODE=1` nor `APP_PASSWORD`, the process refuses to start.
+
+The `Dockerfile` builds that public server mode. It is not deployed from here. Hugging Face Docker Spaces on the free CPU tier now require a paid PRO subscription, and this change does not buy one or attach a GPU. Vercel and Firebase were not connected, and they are a poor fit for this long-running OCR process without a billed backend.
 
 ## What it does
 
 - Upload scans or PDFs and pick pages
-- Transcribe with a vision model (or mock mode with no key)
-- Export to searchable PDF, Word, Markdown, plain text and JSON
-- Optional cited web research against the transcription
+- Transcribe in the browser, or with Claude on your own server
+- Export to Word, Markdown, plain text and JSON. The personal server also writes a searchable PDF
+- Cited web research stays on the personal server, where you supply the key
 - Spec for the longer-term workbench design: `spec.md`
 
 ## Run locally
@@ -28,7 +44,8 @@ Open http://127.0.0.1:8000
 
 Copy `.env.example` to `.env`. Never commit `.env`. Useful variables:
 
-- `ANTHROPIC_API_KEY` — required for real OCR; without it the app runs in mock mode
+- `ANTHROPIC_API_KEY` — personal OCR and research only. Ignored when `PUBLIC_MODE=1`
+- `PUBLIC_MODE` — set to `1` on any shared server
 - Optional model overrides: `MODEL_TIER1`, `MODEL_TIER2`, `MODEL_TIER3`, `MODEL_RESEARCH`
 
 ## Licence

@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' blob: data:; style-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; connect-src 'self'; base-uri 'none'; object-src 'none'">
+<title>Archive Workbench</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header class="top">
+  <h1>Archive Workbench</h1>
+  <p>Public edition. A page is transcribed in this browser with Tesseract. The file is not uploaded and is not saved on the server. Web research is off, so nobody's API key is used. Refreshing the tab clears the session.</p>
+</header>
+<div id="app">
+<aside>
+  <div id="drop" tabindex="0">Drop a PDF or image here<br><span class="sm">or click to choose. Up to 3 files, 8 MB and 5 pages each.</span></div>
+  <input id="file" type="file" multiple hidden accept=".pdf,.png,.jpg,.jpeg,.webp,application/pdf,image/png,image/jpeg,image/webp">
+  <label class="field" for="lang">OCR language</label>
+  <select id="lang">
+    <option value="eng" selected>English</option>
+    <option value="por">Portuguese</option>
+    <option value="kan">Kannada</option>
+    <option value="eng+por">English and Portuguese</option>
+  </select>
+  <div class="actions">
+    <button type="button" class="primary" id="sample">Try a sample page</button>
+  </div>
+  <p id="status" role="status" aria-live="polite"></p>
+  <div id="list"></div>
+</aside>
+<main>
+  <div id="empty">
+    <strong>Upload a document to begin</strong>
+    A born-digital PDF keeps its text layer. A scan or photo is read in this browser. You can correct the text and download it.
+  </div>
+  <div id="work">
+    <div id="head">
+      <h2 id="title"></h2>
+      <span id="downloads"></span>
+      <button type="button" id="remove">Remove</button>
+    </div>
+    <div id="viewer">
+      <div id="imgwrap"><img id="img" alt="Page being transcribed"></div>
+      <div id="text"></div>
+    </div>
+  </div>
+</main>
+</div>
+<script src="vendor/pdfjs/pdf.min.js"></script>
+<script src="vendor/tesseract/tesseract.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

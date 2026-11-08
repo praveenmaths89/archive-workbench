@@ -2,26 +2,29 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 import secrets
-import shutil
 import threading
 import zipfile
+from contextlib import asynccontextmanager
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import List, Optional
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from . import export, ingest, research as research_mod, store
+from . import access, export, ingest, research as research_mod, store
 from .ranges import parse_pages
 from .adapters import get_adapter
 from .config import ROOT, settings
 from .ir import DocumentIR
 from .pipeline import FatalProviderError, process_document, process_page
+
+log = logging.getLogger("app")
 
 API = "/api/v1"
 
@@ -35,14 +38,31 @@ auth_cfg = Auth()
 basic = HTTPBasic(auto_error=False)
 
 
-def require_login(creds: HTTPBasicCredentials | None = Depends(basic)):
-    if not auth_cfg.app_password:
+def require_login(request: Request, creds: HTTPBasicCredentials | None = Depends(basic)):
+    if request.url.path == "/healthz":
+        return
+    if settings.public_mode or not auth_cfg.app_password:
         return
     if not creds or not secrets.compare_digest(creds.password, auth_cfg.app_password):
         raise HTTPException(401, "login required", headers={"WWW-Authenticate": "Basic"})
 
 
-app = FastAPI(title="Historical Document OCR", dependencies=[Depends(require_login)])
+def current_visitor(request: Request) -> str | None:
+    return getattr(request.state, "visitor", None)
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    access.assert_safe_host(auth_cfg.app_password)
+    if settings.public_mode:
+        access.purge_expired()
+        if settings.anthropic_api_key:
+            log.warning("PUBLIC_MODE is on; the configured API key is not used.")
+    yield
+
+
+app = FastAPI(title="Historical Document OCR", lifespan=lifespan, dependencies=[Depends(require_login)])
+app.add_middleware(access.SecurityMiddleware)
 pool = ThreadPoolExecutor(max_workers=settings.workers)
 FORMATS = {"docx", "pdf", "txt", "md", "json"}
 SAFE_EXT = {"pdf", "png", "jpg", "jpeg", "tif", "tiff", "webp"}
@@ -95,9 +115,11 @@ def run_document(job_id: str, doc_id: str, filename: str, src: Path, kind: str, 
         else:
             store.update_document(doc_id, status="done" if not failed else "done_with_errors")
     except FatalProviderError as e:
-        store.update_document(doc_id, status="failed", error=str(e))
+        store.update_document(doc_id, status="failed", error=str(e)[:300])
     except Exception as e:
-        store.update_document(doc_id, status="failed", error=f"{type(e).__name__}: {e}")
+        log.exception("document %s failed", doc_id)
+        message = "The document could not be processed." if settings.public_mode else f"{type(e).__name__}: {e}"
+        store.update_document(doc_id, status="failed", error=message)
     finally:
         stop_requests.discard(doc_id)
         with busy_lock:
@@ -105,17 +127,28 @@ def run_document(job_id: str, doc_id: str, filename: str, src: Path, kind: str, 
 
 
 @app.post(f"{API}/jobs")
-async def create_job(files: List[UploadFile] = File(...), options: str = Form("{}")):
+async def create_job(request: Request, files: List[UploadFile] = File(...), options: str = Form("{}")):
+    if len(options) > 20_000:
+        raise HTTPException(400, "options are too large")
     try:
         opts = json.loads(options)
     except json.JSONDecodeError:
         raise HTTPException(400, "options must be JSON")
-    if len(files) > settings.max_files_per_job:
-        raise HTTPException(400, f"max {settings.max_files_per_job} files per job")
-    job_id = store.create_job(json.dumps(opts))
+    if not isinstance(opts, dict):
+        raise HTTPException(400, "options must be a JSON object")
+    opts = access.scrub_options(opts)
+    if settings.public_mode:
+        opts.pop("pin_model", None)
+        opts.pop("model", None)
+    visitor = current_visitor(request)
+    access.enforce_new_job(visitor)
+    if len(files) > settings.files_limit:
+        raise HTTPException(400, f"max {settings.files_limit} files per job")
+    job_id = store.create_job(json.dumps(opts), visitor_id=visitor)
     results = []
     for f in files:
-        name = Path(f.filename or "upload").name
+        raw_name = f.filename or "upload"
+        name = access.safe_filename(raw_name)
         ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
         doc_id = store.add_document(job_id, name, "unknown")
         d = doc_dir(job_id, doc_id)
@@ -125,21 +158,25 @@ async def create_job(files: List[UploadFile] = File(...), options: str = Form("{
         with src.open("wb") as out:
             while chunk := await f.read(1 << 20):
                 size += len(chunk)
-                if size > settings.max_file_mb * 1024 * 1024:
+                if size > settings.file_limit_mb * 1024 * 1024:
                     break
                 out.write(chunk)
         try:
-            if size > settings.max_file_mb * 1024 * 1024:
-                raise ingest.IngestError(f"file exceeds {settings.max_file_mb} MB")
+            if size > settings.file_limit_mb * 1024 * 1024:
+                raise ingest.IngestError(f"file exceeds {settings.file_limit_mb} MB")
             kind = ingest.detect_kind(src)
             total = ingest.page_count(src, kind)
-            spec = (opts.get("pages_by_file") or {}).get(name, opts.get("pages"))
+            by = opts.get("pages_by_file") if isinstance(opts.get("pages_by_file"), dict) else {}
+            spec = by.get(raw_name, by.get(name, opts.get("pages")))
             try:
                 pages = parse_pages(spec, total)
             except ValueError as ve:
                 raise ingest.IngestError(f"page range: {ve} (file has {total} pages)")
-            if len(pages or range(total)) > settings.max_pages_per_file:
-                raise ingest.IngestError(f"more than {settings.max_pages_per_file} pages selected")
+            selected = len(pages) if pages else total
+            if selected > settings.pages_limit:
+                raise ingest.IngestError(f"more than {settings.pages_limit} pages selected")
+            if settings.public_mode and visitor and selected > access.pages_remaining(visitor):
+                raise ingest.IngestError("daily page limit reached for this session")
         except Exception as e:
             store.update_document(doc_id, status="rejected", error=str(e))
             src.unlink(missing_ok=True)
@@ -153,21 +190,31 @@ async def create_job(files: List[UploadFile] = File(...), options: str = Form("{
     return {"job_id": job_id, "documents": results}
 
 
+@app.get("/healthz")
+def healthz():
+    return {"ok": True}
+
+
 @app.get(f"{API}/jobs")
-def list_jobs():
-    return store.list_jobs()
+def list_jobs(request: Request):
+    visitor = current_visitor(request)
+    if settings.public_mode:
+        if not visitor:
+            return []
+        rows = store.list_jobs(visitor_id=visitor)
+        return [{"id": r["id"], "created": r["created"]} for r in rows]
+    return [{k: v for k, v in r.items() if k != "visitor_id"} for r in store.list_jobs()]
 
 
 @app.get(f"{API}/jobs/{{job_id}}")
-def job_status(job_id: str):
-    job, docs = store.get_job(job_id)
-    if not job:
-        raise HTTPException(404, "job not found")
+def job_status(job_id: str, request: Request):
+    job, docs = access.require_job(job_id, current_visitor(request))
     return {"job_id": job_id, "created": job["created"], "documents": docs}
 
 
 @app.get(f"{API}/jobs/{{job_id}}/documents/{{doc_id}}")
-def document_detail(job_id: str, doc_id: str):
+def document_detail(job_id: str, doc_id: str, request: Request):
+    access.require_doc(job_id, doc_id, current_visitor(request))
     ir = load_ir(job_id, doc_id)
     return {"doc_id": doc_id, "filename": ir.filename, "pages": [
         {"number": p.number, "status": p.status, "source": p.source, "language": p.language,
@@ -180,14 +227,16 @@ def document_detail(job_id: str, doc_id: str):
 
 
 @app.get(f"{API}/jobs/{{job_id}}/documents/{{doc_id}}/pages/{{n}}/image")
-def page_image(job_id: str, doc_id: str, n: int):
+def page_image(job_id: str, doc_id: str, n: int, request: Request):
     """The page image. Pages that were not OCR'd are rendered on demand so they can still be previewed."""
+    access.require_doc(job_id, doc_id, current_visitor(request))
     ir = load_ir(job_id, doc_id)
     if not 1 <= n <= len(ir.pages):
         raise HTTPException(404, "page image not found")
     page = ir.pages[n - 1]
-    if page.image_path and Path(page.image_path).exists():
-        return FileResponse(page.image_path, media_type="image/jpeg")
+    image = access.contained_file(page.image_path)
+    if image is not None:
+        return FileResponse(image, media_type="image/jpeg")
     doc, src = store.get_document(doc_id), next(doc_dir(job_id, doc_id).glob("source.*"), None)
     if not doc or not src:
         raise HTTPException(404, "page image not found")
@@ -199,9 +248,9 @@ def page_image(job_id: str, doc_id: str, n: int):
 
 
 @app.post(f"{API}/jobs/{{job_id}}/documents/{{doc_id}}/stop")
-def stop_document(job_id: str, doc_id: str):
+def stop_document(job_id: str, doc_id: str, request: Request):
     """Stop OCR after the page currently being read. Finished pages are kept; Start resumes the rest."""
-    doc = store.get_document(doc_id)
+    _job, doc = access.require_doc(job_id, doc_id, current_visitor(request))
     if not doc:
         raise HTTPException(404, "document not found")
     if doc["status"] not in ("queued", "processing"):
@@ -219,9 +268,9 @@ class OcrReq(BaseModel):
 
 
 @app.post(f"{API}/jobs/{{job_id}}/documents/{{doc_id}}/ocr")
-def ocr_more(job_id: str, doc_id: str, req: OcrReq):
+def ocr_more(job_id: str, doc_id: str, req: OcrReq, request: Request):
     """Run OCR on more pages of an already-uploaded document."""
-    doc = store.get_document(doc_id)
+    _job, doc = access.require_doc(job_id, doc_id, current_visitor(request))
     src = next(doc_dir(job_id, doc_id).glob("source.*"), None)
     if not doc or not src:
         raise HTTPException(404, "document not found")
@@ -236,9 +285,11 @@ def ocr_more(job_id: str, doc_id: str, req: OcrReq):
     todo = wanted if req.redo else [n for n in wanted if ir.pages[n - 1].status != "done"]
     if not todo:
         return {"status": "nothing_to_do", "pages": 0}
+    if settings.public_mode and current_visitor(request) and len(todo) > access.pages_remaining(current_visitor(request)):
+        raise HTTPException(429, "daily page limit reached for this session")
     store.update_document(doc_id, status="queued")
     pool.submit(run_document, job_id, doc_id, doc["filename"], src, doc["kind"],
-                {"pin_model": req.model}, todo, req.redo)
+                {"pin_model": None if settings.public_mode else req.model}, todo, req.redo)
     return {"status": "queued", "pages": len(todo)}
 
 
@@ -253,10 +304,18 @@ class PageEdit(BaseModel):
 
 
 @app.put(f"{API}/jobs/{{job_id}}/documents/{{doc_id}}/pages/{{n}}")
-def edit_page(job_id: str, doc_id: str, n: int, body: PageEdit):
+def edit_page(job_id: str, doc_id: str, n: int, body: PageEdit, request: Request):
     """Save corrected text. The model's original output is kept for later threshold review."""
     from .ir import Block
     from .pipeline import count_uncertain
+    access.require_doc(job_id, doc_id, current_visitor(request))
+    if len(body.blocks) > 400:
+        raise HTTPException(400, "too many blocks")
+    for block in body.blocks:
+        if len(block.text) > 20_000:
+            raise HTTPException(400, "block text is too long")
+        if block.rows and (len(block.rows) > 200 or any(len(row) > 40 or any(len(cell) > 2000 for cell in row) for row in block.rows)):
+            raise HTTPException(400, "table is too large")
     ir = load_ir(job_id, doc_id)
     if not 1 <= n <= len(ir.pages):
         raise HTTPException(404, "page not found")
@@ -322,8 +381,11 @@ def run_research_job(job_id: str, doc_id: str, rid: str, req: ResearchReq):
 
 
 @app.post(f"{API}/jobs/{{job_id}}/documents/{{doc_id}}/research")
-def start_research(job_id: str, doc_id: str, req: ResearchReq):
+def start_research(job_id: str, doc_id: str, req: ResearchReq, request: Request):
+    access.require_doc(job_id, doc_id, current_visitor(request))
     load_ir(job_id, doc_id)
+    if settings.public_mode:
+        raise HTTPException(403, "Web research is off on the public server, so a shared API key is not billed.")
     if not settings.anthropic_api_key or settings.use_mock:
         raise HTTPException(400, "research needs an Anthropic API key (not available in mock mode)")
     if req.depth not in research_mod.DEPTH:
@@ -339,17 +401,28 @@ def start_research(job_id: str, doc_id: str, req: ResearchReq):
     return {"research_id": rid, "status": "running"}
 
 
-def find_research(rid: str) -> tuple[Path, dict]:
-    for p in (settings.data_dir / "jobs").glob(f"*/*/research/{rid}.json"):
-        return p, json.loads(p.read_text())
+def find_research(rid: str, visitor: str | None = None) -> tuple[Path, dict]:
+    if not access.ID_RE.fullmatch(rid or ""):
+        raise HTTPException(404, "research not found")
+    root = (settings.data_dir / "jobs").resolve()
+    for p in root.glob(f"*/*/research/{rid}.json"):
+        resolved = p.resolve()
+        if not resolved.is_relative_to(root):
+            continue
+        job_id = resolved.parents[2].name
+        if settings.public_mode:
+            job, _docs = store.get_job(job_id)
+            if not job or not access.same_id(job.get("visitor_id"), visitor):
+                continue
+        return resolved, json.loads(resolved.read_text())
     raise HTTPException(404, "research not found")
 
 
 @app.post(f"{API}/research/{{rid}}/stop")
-def stop_research(rid: str):
+def stop_research(rid: str, request: Request):
     """Stop waiting for a research run. The search call already in flight finishes server-side
     (and is billed), but its result is discarded."""
-    path, rec = find_research(rid)
+    path, rec = find_research(rid, current_visitor(request))
     if rec.get("status") == "running":
         rec.update(status="stopped")
         path.write_text(json.dumps(rec, indent=1))
@@ -357,12 +430,13 @@ def stop_research(rid: str):
 
 
 @app.get(f"{API}/research/{{rid}}")
-def get_research(rid: str):
-    return find_research(rid)[1]
+def get_research(rid: str, request: Request):
+    return find_research(rid, current_visitor(request))[1]
 
 
 @app.get(f"{API}/jobs/{{job_id}}/documents/{{doc_id}}/research")
-def list_research(job_id: str, doc_id: str):
+def list_research(job_id: str, doc_id: str, request: Request):
+    access.require_doc(job_id, doc_id, current_visitor(request))
     d = research_dir(job_id, doc_id)
     recs = [json.loads(p.read_text()) for p in sorted(d.glob("*.json"), key=lambda p: p.stat().st_mtime)] if d.exists() else []
     return [{k: r.get(k) for k in ("id", "status", "question", "depth")} for r in recs]
@@ -378,8 +452,8 @@ def report_markdown(rec: dict) -> str:
 
 
 @app.get(f"{API}/research/{{rid}}/download")
-def download_research(rid: str, format: str = "md"):
-    _, rec = find_research(rid)
+def download_research(rid: str, request: Request, format: str = "md"):
+    _, rec = find_research(rid, current_visitor(request))
     if rec.get("status") != "done":
         raise HTTPException(409, "research not finished")
     md = report_markdown(rec)
@@ -406,29 +480,28 @@ def render(ir: DocumentIR, fmt: str) -> tuple[bytes, str]:
 
 
 @app.get(f"{API}/jobs/{{job_id}}/documents/{{doc_id}}/download")
-def download(job_id: str, doc_id: str, format: str = "docx"):
+def download(job_id: str, doc_id: str, request: Request, format: str = "docx"):
     if format not in FORMATS:
         raise HTTPException(400, f"format must be one of {sorted(FORMATS)}")
+    access.require_doc(job_id, doc_id, current_visitor(request))
     ir = load_ir(job_id, doc_id)
     data, mime = render(ir, format)
-    stem = Path(ir.filename).stem
+    stem = access.safe_stem(ir.filename)
     return Response(data, media_type=mime,
                     headers={"Content-Disposition": f'attachment; filename="{stem}.{format}"'})
 
 
 @app.get(f"{API}/jobs/{{job_id}}/download")
-def download_zip(job_id: str, format: str = "docx"):
+def download_zip(job_id: str, request: Request, format: str = "docx"):
     if format not in FORMATS:
         raise HTTPException(400, f"format must be one of {sorted(FORMATS)}")
-    job, docs = store.get_job(job_id)
-    if not job:
-        raise HTTPException(404, "job not found")
+    _job, docs = access.require_job(job_id, current_visitor(request))
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
         for d in docs:
             if (doc_dir(job_id, d["id"]) / "ir.json").exists():
                 ir = load_ir(job_id, d["id"])
-                z.writestr(f"{Path(ir.filename).stem}.{format}", render(ir, format)[0])
+                z.writestr(f"{access.safe_stem(ir.filename)}.{format}", render(ir, format)[0])
     return Response(buf.getvalue(), media_type="application/zip",
                     headers={"Content-Disposition": f'attachment; filename="job_{job_id}.zip"'})
 
@@ -438,7 +511,10 @@ class Rerun(BaseModel):
 
 
 @app.post(f"{API}/jobs/{{job_id}}/documents/{{doc_id}}/pages/{{n}}/rerun")
-def rerun_page(job_id: str, doc_id: str, n: int, body: Rerun):
+def rerun_page(job_id: str, doc_id: str, n: int, body: Rerun, request: Request):
+    access.require_doc(job_id, doc_id, current_visitor(request))
+    if settings.public_mode:
+        body.model = None
     ir = load_ir(job_id, doc_id)
     doc = store.get_document(doc_id)
     src = next(doc_dir(job_id, doc_id).glob("source.*"), None)
@@ -454,17 +530,35 @@ def rerun_page(job_id: str, doc_id: str, n: int, body: Rerun):
 
 @app.get(f"{API}/models")
 def models():
-    return {"tiers": {t: settings.model_for_tier(t) for t in (1, 2, 3)},
-            "api_key_configured": bool(settings.anthropic_api_key),
-            "mode": "mock" if (settings.use_mock or not settings.anthropic_api_key) else "claude"}
+    if settings.public_mode:
+        mode = "mock" if settings.use_mock else "local"
+        return {
+            "tiers": {"1": "tesseract"},
+            "api_key_configured": False,
+            "mode": mode,
+            "research_enabled": False,
+            "isolation": "session",
+            "limits": {
+                "files": settings.public_max_files,
+                "file_mb": settings.public_max_file_mb,
+                "pages": settings.public_max_pages,
+            },
+            "retention_hours": settings.public_retention_hours,
+        }
+    mode = "mock" if (settings.use_mock or not settings.anthropic_api_key) else "claude"
+    return {
+        "tiers": {t: settings.model_for_tier(t) for t in (1, 2, 3)},
+        "api_key_configured": bool(settings.anthropic_api_key),
+        "mode": mode,
+        "research_enabled": mode == "claude",
+        "isolation": "single_user",
+    }
 
 
 @app.delete(f"{API}/jobs/{{job_id}}")
-def delete_job(job_id: str):
-    shutil.rmtree(settings.data_dir / "jobs" / job_id, ignore_errors=True)
-    with store.db() as c:
-        c.execute("DELETE FROM documents WHERE job_id=?", (job_id,))
-        c.execute("DELETE FROM jobs WHERE id=?", (job_id,))
+def delete_job(job_id: str, request: Request):
+    access.require_job(job_id, current_visitor(request))
+    access.delete_job_files(job_id)
     return {"deleted": job_id}
 
 

@@ -1,0 +1,3 @@
+docs/vendor/**/*.gz binary
+docs/vendor/**/*.wasm binary
+docs/vendor/**/*.wasm.js binary

@@ -8,6 +8,7 @@ from docx import Document
 from docx.enum.text import WD_BREAK
 from docx.shared import Pt
 
+from .access import contained_file
 from .ir import DocumentIR
 
 
@@ -92,16 +93,22 @@ def to_searchable_pdf(ir: DocumentIR) -> bytes:
     """
     out = pymupdf.open()
     for p in done_pages(ir):
-        if not p.image_path:
+        image = contained_file(p.image_path)
+        if image is not None:
+            img = pymupdf.open(image)
+            rect = img[0].rect
+            page = out.new_page(width=rect.width, height=rect.height)
+            page.insert_image(page.rect, filename=str(image))
+            img.close()
+        elif p.text.strip():
+            page = out.new_page()
+        else:
             continue
-        img = pymupdf.open(p.image_path)
-        rect = img[0].rect
-        page = out.new_page(width=rect.width, height=rect.height)
-        page.insert_image(page.rect, filename=p.image_path)
         if p.text.strip():
             page.insert_textbox(page.rect + (10, 10, -10, -10), p.text, fontsize=6,
                                 render_mode=3, fontname="helv")
-        img.close()
+    if out.page_count == 0:
+        out.new_page()
     data = out.tobytes(garbage=3, deflate=True)
     out.close()
     return data
