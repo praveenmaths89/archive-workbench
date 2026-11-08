@@ -29,6 +29,10 @@ log = logging.getLogger("app")
 API = "/api/v1"
 
 
+class SelectionHold(Exception):
+    """The file is valid and stays stored. OCR did not start, so no model call is made."""
+
+
 class Auth(BaseSettings):
     model_config = SettingsConfigDict(env_file=ROOT / ".env", extra="ignore")
     app_password: str = ""  # empty = no login (internal network)
@@ -160,15 +164,18 @@ async def create_job(request: Request, files: List[UploadFile] = File(...), opti
         d = doc_dir(job_id, doc_id)
         d.mkdir(parents=True, exist_ok=True)
         src = d / f"source.{ext if ext in SAFE_EXT else 'bin'}"
+        limit = settings.file_limit_mb * 1024 * 1024
         size = 0
+        too_big = False
         with src.open("wb") as out:
-            while chunk := await f.read(1 << 20):
-                size += len(chunk)
-                if size > settings.file_limit_mb * 1024 * 1024:
+            while chunk := await f.read(1 << 20):  # spool 1 MB at a time; do not buffer the file
+                if size + len(chunk) > limit:
+                    too_big = True
                     break
                 out.write(chunk)
+                size += len(chunk)
         try:
-            if size > settings.file_limit_mb * 1024 * 1024:
+            if too_big:
                 raise ingest.IngestError(f"file exceeds {settings.file_limit_mb} MB")
             kind = ingest.detect_kind(src)
             total = ingest.page_count(src, kind)
@@ -180,13 +187,26 @@ async def create_job(request: Request, files: List[UploadFile] = File(...), opti
                 raise ingest.IngestError(f"page range: {ve} (file has {total} pages)")
             selected = len(pages) if pages else total
             if selected > settings.pages_limit:
-                raise ingest.IngestError(f"more than {settings.pages_limit} pages selected")
+                cap = settings.pages_limit
+                raise SelectionHold(
+                    f"This file has {total} pages. Choose at most {cap} "
+                    f"{'page' if cap == 1 else 'pages'} to read now "
+                    f"(for example 1-{min(cap, total)}). The file is kept; "
+                    f"the other pages are not sent to the model until you ask for them.")
             if settings.shared and visitor and selected > access.pages_remaining(visitor):
-                raise ingest.IngestError("daily page limit reached for this session")
+                raise SelectionHold(
+                    f"Daily page limit reached for this session. This file has {total} pages and is kept; "
+                    f"choose a shorter range.")
+        except SelectionHold as e:
+            store.update_document(doc_id, kind=kind, status="needs_range", error=str(e),
+                                  total_pages=total, selected_pages=0)
+            results.append({"doc_id": doc_id, "filename": name, "status": "needs_range",
+                            "error": str(e), "pages": 0, "total_pages": total})
+            continue
         except Exception as e:
-            store.update_document(doc_id, status="rejected", error=str(e))
+            store.update_document(doc_id, status="rejected", error=access.redact(str(e))[:300])
             src.unlink(missing_ok=True)
-            results.append({"doc_id": doc_id, "filename": name, "status": "rejected", "error": str(e)})
+            results.append({"doc_id": doc_id, "filename": name, "status": "rejected", "error": access.redact(str(e))[:300]})
             continue
         store.update_document(doc_id, kind=kind)
         store.update_document(doc_id, total_pages=total, selected_pages=len(pages) if pages else total)
@@ -286,14 +306,23 @@ def ocr_more(job_id: str, doc_id: str, req: OcrReq, request: Request):
         pages = parse_pages(req.pages, doc["total_pages"])
     except ValueError as e:
         raise HTTPException(400, f"page range: {e} (file has {doc['total_pages']} pages)")
-    ir = load_ir(job_id, doc_id)
-    wanted = pages or [p.number for p in ir.pages]
-    todo = wanted if req.redo else [n for n in wanted if ir.pages[n - 1].status != "done"]
+    ir_path = doc_dir(job_id, doc_id) / "ir.json"
+    if ir_path.exists():
+        ir = load_ir(job_id, doc_id)
+        wanted = pages or [p.number for p in ir.pages]
+        todo = wanted if req.redo else [n for n in wanted if ir.pages[n - 1].status != "done"]
+    else:
+        wanted = pages or list(range(1, doc["total_pages"] + 1))
+        todo = wanted
     if not todo:
         return {"status": "nothing_to_do", "pages": 0}
+    if len(todo) > settings.pages_limit:
+        raise HTTPException(400, (
+            f"Choose at most {settings.pages_limit} pages at a time. "
+            f"This file has {doc['total_pages']} pages; unread pages stay on the server and are not sent to the model."))
     if settings.shared and current_visitor(request) and len(todo) > access.pages_remaining(current_visitor(request)):
         raise HTTPException(429, "daily page limit reached for this session")
-    store.update_document(doc_id, status="queued")
+    store.update_document(doc_id, status="queued", error=None)
     pool.submit(run_document, job_id, doc_id, doc["filename"], src, doc["kind"],
                 {"pin_model": None if settings.public_mode else req.model}, todo, req.redo)
     return {"status": "queued", "pages": len(todo)}

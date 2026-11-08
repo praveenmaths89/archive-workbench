@@ -36,7 +36,9 @@ class Settings(BaseSettings):
     cookie_secure: bool = False
     ocr_engine: str = "auto"  # auto | tesseract | claude | mock
     public_max_files: int = 3
-    public_max_file_mb: int = 8
+    # 50 MB fits the free instance: the body is streamed in 1 MB pieces, and only one
+    # page image is rendered at a time. It is not loaded whole into RAM.
+    public_max_file_mb: int = 50
     public_max_pages: int = 5
     public_max_jobs: int = 8
     public_max_jobs_per_hour: int = 6

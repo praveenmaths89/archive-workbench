@@ -38,7 +38,7 @@ uvicorn app.main:app --port 8000
 HOSTED_MODE=1 ANTHROPIC_API_KEY=... uvicorn app.main:app --host 0.0.0.0 --port "${PORT:-8000}"
 ```
 
-Technical limits in hosted mode: 3 files per job, 8 MB each, 5 pages each, 6 jobs an hour, 20 pages a day, 8 stored jobs, one in-flight job per session, one worker in the Render image. GitHub Pages at https://praveenmaths89.github.io/archive-workbench/ is unchanged and is not this server.
+Technical limits in hosted mode: 3 files per job, 50 MB each, at most 5 pages read at a time, 6 jobs an hour, 20 pages a day, 8 stored jobs, one in-flight job per session, one worker in the Render image. A longer PDF is stored with its page count and is not sent to the model until you choose a range such as `1-5`. GitHub Pages at https://praveenmaths89.github.io/archive-workbench/ is unchanged and is not this server.
 
 ## What it does
 
