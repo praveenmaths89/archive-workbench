@@ -138,7 +138,9 @@ def test_public_limits_and_filename(monkeypatch):
     assert rejected.json()["documents"][0]["status"] == "rejected"
 
     too_many = client.post("/api/v1/jobs", files=[("files", ("s.pdf", make_scan_pdf(2), "application/pdf"))])
-    assert too_many.json()["documents"][0]["status"] == "rejected"
+    held = too_many.json()["documents"][0]
+    assert held["status"] == "needs_range" and held["total_pages"] == 2
+    assert "2 pages" in held["error"] and (settings.data_dir / "jobs" / too_many.json()["job_id"]).exists()
 
     tricky = client.post(
         "/api/v1/jobs",

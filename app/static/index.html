@@ -117,13 +117,17 @@ const save=()=>{try{localStorage.setItem('jobs',JSON.stringify(jobs.slice(0,15))
 function applyMeta(m){const e=$('#mode'),lead=$('#lead'),on=!!m.research_enabled;
  $('#ask').hidden=!on;const tab=document.querySelector('.tab[data-t="rs"]');if(tab)tab.hidden=!on;
  if(!on&&state.tab==='rs'&&typeof showTab==='function')showTab('tr');
- if(m.mode==='local'){e.textContent='Local OCR · this browser session only';e.className='';
+ if(m.hosted&&m.mode==='unavailable'){e.textContent='Server API key is not configured';e.className='warn';
+  if(lead)lead.textContent='Scan transcription and web search are unavailable until the server Anthropic key is set. Placeholder text is not returned.';}
+ else if(m.hosted){e.textContent='Claude · this browser session only';e.className='';
+  if(lead)lead.textContent='Scans are transcribed with Claude, and web search uses the transcript. Only this browser can open what you upload.';}
+ else if(m.mode==='local'){e.textContent='Local OCR · this browser session only';e.className='';
   if(lead)lead.textContent='Pages are transcribed on this server with Tesseract. Only this browser can open them, and they are deleted within 24 hours. Web research is off, so no shared API key is used.';}
  else if(m.mode==='mock'){e.textContent='Mock mode: no API key, placeholder text';e.className='warn';
   if(lead)lead.textContent='Mock mode is on, so transcription is a placeholder. A personal API key is required for Claude, and it is not used by the public edition.';}
  else{e.textContent='Claude connected';e.className='';
   if(lead)lead.textContent='Pages are transcribed with Claude. Then review them beside the original, export, or research the context on the web.';}
- const lim=$('#limits');if(lim){if(m.limits){lim.hidden=false;lim.textContent=`Up to ${m.limits.files} files, ${m.limits.file_mb} MB and ${m.limits.pages} pages each.`;}else lim.hidden=true;}}
+ const lim=$('#limits');if(lim){if(m.limits){lim.hidden=false;lim.textContent=`Up to ${m.limits.files} files, ${m.limits.file_mb} MB each. A longer PDF is kept; choose at most ${m.limits.pages} pages to read at a time.`;}else lim.hidden=true;}}
 fetch(API+'/models').then(r=>r.json()).then(applyMeta).catch(()=>{});
 
 /* ---------- upload + library ---------- */
@@ -136,7 +140,7 @@ function stageFiles(files){staged.push(...[...files]);renderStage()}
 function renderStage(){const el=$('#stage');if(!staged.length){el.hidden=true;return}el.hidden=false;
  el.innerHTML=`<div class="sm" style="margin-bottom:4px"><b style="color:var(--fg)">${staged.length} file${staged.length>1?'s':''} ready</b> — choose which pages to OCR</div>`+
   staged.map((f,i)=>`<div class="f"><span style="font-size:.8rem;word-break:break-word">${esc(f.name)}</span> <span class="sm">${(f.size/1048576).toFixed(1)} MB</span>
-   <button class="docbtn" data-rm="${i}" title="Remove">✕</button><input data-pg="${i}" placeholder="all pages  ·  or e.g. 1-5, 8, 12-"></div>`).join('')+
+   <button class="docbtn" data-rm="${i}" title="Remove">✕</button><input data-pg="${i}" placeholder="pages to read now, e.g. 1-5 — blank reads a short file"></div>`).join('')+
   `<div style="display:flex;gap:6px;margin-top:8px"><button class="go" id="stgo" style="flex:1">▶ Start OCR</button><button id="stclr">Clear</button></div>`;
  el.querySelectorAll('[data-rm]').forEach(b=>b.onclick=()=>{staged.splice(+b.dataset.rm,1);renderStage()});
  $('#stclr').onclick=()=>{staged=[];renderStage()};$('#stgo').onclick=startUpload}
@@ -145,7 +149,7 @@ async function startUpload(){const fd=new FormData(),by={};
  fd.append('options',JSON.stringify({pages_by_file:by}));$('#stgo').disabled=true;$('#stgo').textContent='Uploading…';
  try{const r=await fetch(API+'/jobs',{method:'POST',body:fd});if(!r.ok)throw new Error(await r.text());
   const j=await r.json();jobs.unshift(j.job_id);save();staged=[];inp.value='';renderStage();
-  const bad=j.documents.filter(d=>d.status==='rejected');if(bad.length)toast(bad.map(d=>d.filename+': '+d.error).join(' | '));
+  const bad=j.documents.filter(d=>d.status==='rejected'||d.status==='needs_range');if(bad.length)toast(bad.map(d=>d.filename+': '+d.error).join(' | '));
   await refresh();const ok=j.documents.find(d=>d.status!=='rejected');if(ok)openDoc(ok.doc_id)}
  catch(e){toast('Upload failed: '+e.message);renderStage()}}
 async function stopDoc(id,ev){if(ev)ev.stopPropagation();const d=state.docs[id];await fetch(`${API}/jobs/${d.job}/documents/${id}/stop`,{method:'POST'});

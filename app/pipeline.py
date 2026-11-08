@@ -6,7 +6,8 @@ import re
 from pathlib import Path
 from typing import Callable, Optional
 
-from .adapters import EngineMissing, OcrAdapter
+from .access import redact
+from .adapters import EngineMissing, NeedsApiKey, OcrAdapter
 from .config import settings
 from .ingest import iter_pages, to_jpeg
 from .ir import Block, DocumentIR, Page
@@ -20,8 +21,8 @@ class FatalProviderError(RuntimeError):
 
 
 def fatal_message(e: Exception) -> str | None:
-    if isinstance(e, EngineMissing):
-        return str(e)
+    if isinstance(e, (EngineMissing, NeedsApiKey)):
+        return redact(str(e))
     text = str(e).lower()
     if "credit balance is too low" in text:
         return ("Your Anthropic credit balance is too low. Add credits at console.anthropic.com "
@@ -80,9 +81,12 @@ def process_page(adapter: OcrAdapter, number: int, img, text_layer: str, out_dir
             fatal = fatal_message(e)
             if fatal:
                 raise FatalProviderError(fatal) from e
-            log.exception("OCR failed on page %s", number)
+            log.error("OCR failed on page %s: %s", number, redact(f"{type(e).__name__}: {e}"))
             page.status = "failed"
-            page.error = "This page could not be read." if settings.public_mode else f"{type(e).__name__}: {e}"
+            if settings.public_mode and not settings.hosted_mode:
+                page.error = "This page could not be read."
+            else:
+                page.error = redact(f"{type(e).__name__}: {e}")
             return page
         page.blocks, page.language, page.confidence = res.blocks, res.language, res.confidence
         page.input_tokens += res.input_tokens

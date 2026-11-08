@@ -1,11 +1,8 @@
 FROM python:3.12-slim-bookworm
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        tesseract-ocr \
-        tesseract-ocr-eng \
-        tesseract-ocr-por \
-        tesseract-ocr-kan \
-        libglib2.0-0 \
+# Render's free instance has 512 MB. The full app needs the Python imaging
+# stack; Tesseract is not installed because hosted OCR is Claude.
+RUN apt-get update && apt-get install -y --no-install-recommends libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -18,12 +15,13 @@ RUN useradd --create-home --uid 1000 appuser \
     && chown appuser /tmp/archive-workbench
 USER appuser
 
-ENV PUBLIC_MODE=1 \
-    PORT=7860 \
+# The Anthropic key is not baked into the image. Set it as a Render secret.
+ENV HOSTED_MODE=1 \
+    WORKERS=1 \
     COOKIE_SECURE=1 \
     DATA_DIR=/tmp/archive-workbench \
-    OCR_ENGINE=tesseract \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    PORT=10000
 
-EXPOSE 7860
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "7860"]
+EXPOSE 10000
+CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-10000}"]

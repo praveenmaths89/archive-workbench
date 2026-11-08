@@ -29,6 +29,10 @@ log = logging.getLogger("app")
 API = "/api/v1"
 
 
+class SelectionHold(Exception):
+    """The file is valid and stays stored. OCR did not start, so no model call is made."""
+
+
 class Auth(BaseSettings):
     model_config = SettingsConfigDict(env_file=ROOT / ".env", extra="ignore")
     app_password: str = ""  # empty = no login (internal network)
@@ -41,7 +45,7 @@ basic = HTTPBasic(auto_error=False)
 def require_login(request: Request, creds: HTTPBasicCredentials | None = Depends(basic)):
     if request.url.path == "/healthz":
         return
-    if settings.public_mode or not auth_cfg.app_password:
+    if settings.shared or not auth_cfg.app_password:
         return
     if not creds or not secrets.compare_digest(creds.password, auth_cfg.app_password):
         raise HTTPException(401, "login required", headers={"WWW-Authenticate": "Basic"})
@@ -54,10 +58,14 @@ def current_visitor(request: Request) -> str | None:
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     access.assert_safe_host(auth_cfg.app_password)
-    if settings.public_mode:
+    if settings.shared:
         access.purge_expired()
-        if settings.anthropic_api_key:
-            log.warning("PUBLIC_MODE is on; the configured API key is not used.")
+    if settings.public_mode and settings.anthropic_api_key:
+        log.warning("PUBLIC_MODE is on; the configured API key is not used.")
+    if settings.hosted_mode and settings.anthropic_api_key:
+        log.warning("HOSTED_MODE is on. OCR and web search use the server API key. Sessions are isolated.")
+    elif settings.hosted_mode:
+        log.warning("HOSTED_MODE is on and ANTHROPIC_API_KEY is empty. OCR and web search will refuse work.")
     yield
 
 
@@ -115,11 +123,13 @@ def run_document(job_id: str, doc_id: str, filename: str, src: Path, kind: str, 
         else:
             store.update_document(doc_id, status="done" if not failed else "done_with_errors")
     except FatalProviderError as e:
-        store.update_document(doc_id, status="failed", error=str(e)[:300])
+        store.update_document(doc_id, status="failed", error=access.redact(str(e))[:300])
     except Exception as e:
-        log.exception("document %s failed", doc_id)
-        message = "The document could not be processed." if settings.public_mode else f"{type(e).__name__}: {e}"
-        store.update_document(doc_id, status="failed", error=message)
+        safe = access.redact(f"{type(e).__name__}: {e}")
+        log.error("document %s failed: %s", doc_id, safe)
+        if settings.public_mode and not settings.hosted_mode:
+            safe = "The document could not be processed."
+        store.update_document(doc_id, status="failed", error=safe[:300])
     finally:
         stop_requests.discard(doc_id)
         with busy_lock:
@@ -154,15 +164,18 @@ async def create_job(request: Request, files: List[UploadFile] = File(...), opti
         d = doc_dir(job_id, doc_id)
         d.mkdir(parents=True, exist_ok=True)
         src = d / f"source.{ext if ext in SAFE_EXT else 'bin'}"
+        limit = settings.file_limit_mb * 1024 * 1024
         size = 0
+        too_big = False
         with src.open("wb") as out:
-            while chunk := await f.read(1 << 20):
-                size += len(chunk)
-                if size > settings.file_limit_mb * 1024 * 1024:
+            while chunk := await f.read(1 << 20):  # spool 1 MB at a time; do not buffer the file
+                if size + len(chunk) > limit:
+                    too_big = True
                     break
                 out.write(chunk)
+                size += len(chunk)
         try:
-            if size > settings.file_limit_mb * 1024 * 1024:
+            if too_big:
                 raise ingest.IngestError(f"file exceeds {settings.file_limit_mb} MB")
             kind = ingest.detect_kind(src)
             total = ingest.page_count(src, kind)
@@ -174,13 +187,26 @@ async def create_job(request: Request, files: List[UploadFile] = File(...), opti
                 raise ingest.IngestError(f"page range: {ve} (file has {total} pages)")
             selected = len(pages) if pages else total
             if selected > settings.pages_limit:
-                raise ingest.IngestError(f"more than {settings.pages_limit} pages selected")
-            if settings.public_mode and visitor and selected > access.pages_remaining(visitor):
-                raise ingest.IngestError("daily page limit reached for this session")
+                cap = settings.pages_limit
+                raise SelectionHold(
+                    f"This file has {total} pages. Choose at most {cap} "
+                    f"{'page' if cap == 1 else 'pages'} to read now "
+                    f"(for example 1-{min(cap, total)}). The file is kept; "
+                    f"the other pages are not sent to the model until you ask for them.")
+            if settings.shared and visitor and selected > access.pages_remaining(visitor):
+                raise SelectionHold(
+                    f"Daily page limit reached for this session. This file has {total} pages and is kept; "
+                    f"choose a shorter range.")
+        except SelectionHold as e:
+            store.update_document(doc_id, kind=kind, status="needs_range", error=str(e),
+                                  total_pages=total, selected_pages=0)
+            results.append({"doc_id": doc_id, "filename": name, "status": "needs_range",
+                            "error": str(e), "pages": 0, "total_pages": total})
+            continue
         except Exception as e:
-            store.update_document(doc_id, status="rejected", error=str(e))
+            store.update_document(doc_id, status="rejected", error=access.redact(str(e))[:300])
             src.unlink(missing_ok=True)
-            results.append({"doc_id": doc_id, "filename": name, "status": "rejected", "error": str(e)})
+            results.append({"doc_id": doc_id, "filename": name, "status": "rejected", "error": access.redact(str(e))[:300]})
             continue
         store.update_document(doc_id, kind=kind)
         store.update_document(doc_id, total_pages=total, selected_pages=len(pages) if pages else total)
@@ -198,7 +224,7 @@ def healthz():
 @app.get(f"{API}/jobs")
 def list_jobs(request: Request):
     visitor = current_visitor(request)
-    if settings.public_mode:
+    if settings.shared:
         if not visitor:
             return []
         rows = store.list_jobs(visitor_id=visitor)
@@ -280,14 +306,23 @@ def ocr_more(job_id: str, doc_id: str, req: OcrReq, request: Request):
         pages = parse_pages(req.pages, doc["total_pages"])
     except ValueError as e:
         raise HTTPException(400, f"page range: {e} (file has {doc['total_pages']} pages)")
-    ir = load_ir(job_id, doc_id)
-    wanted = pages or [p.number for p in ir.pages]
-    todo = wanted if req.redo else [n for n in wanted if ir.pages[n - 1].status != "done"]
+    ir_path = doc_dir(job_id, doc_id) / "ir.json"
+    if ir_path.exists():
+        ir = load_ir(job_id, doc_id)
+        wanted = pages or [p.number for p in ir.pages]
+        todo = wanted if req.redo else [n for n in wanted if ir.pages[n - 1].status != "done"]
+    else:
+        wanted = pages or list(range(1, doc["total_pages"] + 1))
+        todo = wanted
     if not todo:
         return {"status": "nothing_to_do", "pages": 0}
-    if settings.public_mode and current_visitor(request) and len(todo) > access.pages_remaining(current_visitor(request)):
+    if len(todo) > settings.pages_limit:
+        raise HTTPException(400, (
+            f"Choose at most {settings.pages_limit} pages at a time. "
+            f"This file has {doc['total_pages']} pages; unread pages stay on the server and are not sent to the model."))
+    if settings.shared and current_visitor(request) and len(todo) > access.pages_remaining(current_visitor(request)):
         raise HTTPException(429, "daily page limit reached for this session")
-    store.update_document(doc_id, status="queued")
+    store.update_document(doc_id, status="queued", error=None)
     pool.submit(run_document, job_id, doc_id, doc["filename"], src, doc["kind"],
                 {"pin_model": None if settings.public_mode else req.model}, todo, req.redo)
     return {"status": "queued", "pages": len(todo)}
@@ -376,7 +411,7 @@ def run_research_job(job_id: str, doc_id: str, rid: str, req: ResearchReq):
         if stopped():
             return
         from .pipeline import fatal_message
-        rec.update(status="failed", error=fatal_message(e) or f"{type(e).__name__}: {e}")
+        rec.update(status="failed", error=access.redact(fatal_message(e) or f"{type(e).__name__}: {e}")[:500])
     path.write_text(json.dumps(rec, indent=1))
 
 
@@ -384,9 +419,11 @@ def run_research_job(job_id: str, doc_id: str, rid: str, req: ResearchReq):
 def start_research(job_id: str, doc_id: str, req: ResearchReq, request: Request):
     access.require_doc(job_id, doc_id, current_visitor(request))
     load_ir(job_id, doc_id)
-    if settings.public_mode:
+    if settings.public_mode and not settings.hosted_mode:
         raise HTTPException(403, "Web research is off on the public server, so a shared API key is not billed.")
-    if not settings.anthropic_api_key or settings.use_mock:
+    if settings.hosted_mode and not settings.anthropic_api_key:
+        raise HTTPException(503, "Web search needs the server Anthropic API key. It is not configured, so this request was not sent.")
+    if not settings.hosted_mode and (not settings.anthropic_api_key or settings.use_mock):
         raise HTTPException(400, "research needs an Anthropic API key (not available in mock mode)")
     if req.depth not in research_mod.DEPTH:
         raise HTTPException(400, f"depth must be one of {sorted(research_mod.DEPTH)}")
@@ -410,7 +447,7 @@ def find_research(rid: str, visitor: str | None = None) -> tuple[Path, dict]:
         if not resolved.is_relative_to(root):
             continue
         job_id = resolved.parents[2].name
-        if settings.public_mode:
+        if settings.shared:
             job, _docs = store.get_job(job_id)
             if not job or not access.same_id(job.get("visitor_id"), visitor):
                 continue
@@ -530,6 +567,24 @@ def rerun_page(job_id: str, doc_id: str, n: int, body: Rerun, request: Request):
 
 @app.get(f"{API}/models")
 def models():
+    if settings.hosted_mode:
+        configured = bool(settings.anthropic_api_key)
+        return {
+            "tiers": {t: settings.model_for_tier(t) for t in (1, 2, 3)},
+            "api_key_configured": configured,
+            "mode": "claude" if configured else "unavailable",
+            "research_enabled": configured,
+            "hosted": True,
+            "isolation": "session",
+            "limits": {
+                "files": settings.public_max_files,
+                "file_mb": settings.public_max_file_mb,
+                "pages": settings.public_max_pages,
+                "jobs_per_hour": settings.public_max_jobs_per_hour,
+                "pages_per_day": settings.public_max_pages_per_day,
+            },
+            "retention_hours": settings.public_retention_hours,
+        }
     if settings.public_mode:
         mode = "mock" if settings.use_mock else "local"
         return {

@@ -1,0 +1,21 @@
+# Free Render web service for the full OCR and web-search server.
+# Do not change plan to a paid instance.
+services:
+  - type: web
+    name: archive-workbench
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /healthz
+    envVars:
+      - key: HOSTED_MODE
+        value: "1"
+      - key: COOKIE_SECURE
+        value: "1"
+      - key: WORKERS
+        value: "1"
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      # Set in the Render dashboard. Leave this unset in git.
+      - key: ANTHROPIC_API_KEY
+        sync: false
