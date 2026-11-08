@@ -12,7 +12,7 @@ Anyone can open the public edition without an account. Transcription runs in the
 
 Documents are not uploaded and are not stored on the server. There is no shared history, no admin view, and no web research, because research would send text to a paid API. Refreshing the tab clears the session. Limits are 3 files, 8 MB each, and 5 pages each. TIFF is not decoded in the browser; use PDF, PNG, JPEG, or WebP.
 
-The site is the `docs/` directory. GitHub Pages serves it at https://praveenmaths89.github.io/archive-workbench/ when Pages is enabled for this repository. `.github/workflows/pages.yml` publishes `docs/` on each push to `main`.
+The site is the `docs/` directory. `.github/workflows/pages.yml` publishes it on each push to `main`, which is what produces https://praveenmaths89.github.io/archive-workbench/. Creating the Pages site from this environment returns HTTP 403, "Resource not accessible by integration," so that address is not serving the app until the workflow run on `main` succeeds. The first run can also wait for a repository admin to approve the `github-pages` environment.
 
 ## Personal server
 
