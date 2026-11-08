@@ -1,0 +1,117 @@
+:root {
+  --bg: #f6f5f1;
+  --panel: #fff;
+  --fg: #1f1e1b;
+  --mut: #6d6a62;
+  --line: #e0ddd4;
+  --acc: #7a2e1d;
+  --acc2: #f3e6e1;
+  --ok: #2d6a3e;
+  --bad: #a02323;
+  --ui: system-ui, -apple-system, "Segoe UI", sans-serif;
+  --serif: Georgia, "Times New Roman", serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #141413;
+    --panel: #1d1d1b;
+    --fg: #ecebe6;
+    --mut: #9b988f;
+    --line: #34332f;
+    --acc: #e3947e;
+    --acc2: #2c1f1b;
+    --ok: #76c48c;
+    --bad: #e88282;
+  }
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 15px/1.5 var(--ui);
+}
+button, select, input, textarea { font: inherit; color: inherit; }
+button {
+  padding: 6px 12px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  border-radius: 6px;
+  cursor: pointer;
+}
+button:hover { border-color: var(--acc); }
+button:focus-visible, select:focus-visible, input:focus-visible, textarea:focus-visible {
+  outline: 2px solid var(--acc);
+  outline-offset: 2px;
+}
+button.primary { background: var(--acc); color: #fff; border-color: var(--acc); }
+button:disabled { opacity: 0.55; cursor: default; }
+header.top {
+  padding: 14px 18px 10px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+header.top h1 { font: 600 1.15rem var(--serif); margin: 0; }
+header.top p { margin: 4px 0 0; color: var(--mut); font-size: 0.85rem; max-width: 70rem; }
+#app { display: grid; grid-template-columns: 320px 1fr; min-height: calc(100vh - 78px); }
+aside {
+  border-right: 1px solid var(--line);
+  background: var(--panel);
+  padding: 12px;
+}
+#drop {
+  border: 2px dashed var(--line);
+  border-radius: 8px;
+  padding: 18px 10px;
+  text-align: center;
+  color: var(--mut);
+  cursor: pointer;
+}
+#drop:hover, #drop.over { border-color: var(--acc); color: var(--fg); }
+label.field { display: block; margin: 12px 0 4px; font-size: 0.8rem; color: var(--mut); }
+select, textarea { width: 100%; padding: 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); }
+.actions { display: flex; gap: 8px; margin-top: 10px; }
+.actions button { flex: 1; }
+#status { min-height: 1.4em; margin: 10px 0; font-size: 0.85rem; }
+#status.bad { color: var(--bad); }
+#list { display: flex; flex-direction: column; gap: 8px; }
+.doc {
+  text-align: left;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: var(--bg);
+}
+.doc.on { border-color: var(--acc); background: var(--acc2); }
+.doc b { display: block; font-weight: 600; word-break: break-word; }
+.sm { color: var(--mut); font-size: 0.78rem; }
+main { min-width: 0; display: flex; flex-direction: column; }
+#empty { margin: auto; text-align: center; color: var(--mut); padding: 24px; }
+#empty strong { display: block; font: 1.1rem var(--serif); color: var(--fg); margin-bottom: 6px; }
+#work { display: none; flex-direction: column; min-height: 0; flex: 1; }
+#work.on { display: flex; }
+#head {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+#head h2 { font: 600 1.05rem var(--serif); margin: 0; flex: 1; min-width: 12rem; word-break: break-word; }
+#viewer { display: grid; grid-template-columns: minmax(240px, 1fr) minmax(280px, 1.1fr); min-height: 0; flex: 1; }
+#imgwrap { background: #2a2926; overflow: auto; padding: 10px; }
+#imgwrap img { width: 100%; display: block; }
+#text { padding: 14px 18px 40px; overflow: auto; background: var(--panel); }
+#text pre { font: 1rem/1.6 var(--serif); white-space: pre-wrap; margin: 0; }
+.pager { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
+.chip { font-size: 0.72rem; padding: 2px 8px; border-radius: 99px; border: 1px solid var(--line); color: var(--mut); }
+textarea.edit { width: 100%; min-height: 220px; font: 1rem/1.55 var(--serif); }
+@media (max-width: 820px) {
+  #app { grid-template-columns: 1fr; }
+  aside { border-right: 0; border-bottom: 1px solid var(--line); }
+  #viewer { grid-template-columns: 1fr; }
+  #imgwrap { max-height: 42vh; }
+}

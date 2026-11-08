@@ -34,15 +34,9 @@ def is_blank(signals: dict) -> bool:
     return signals["ink_density"] < 0.002 and signals["contrast"] < 8
 
 
-def route(signals: dict, text_layer_chars: int) -> Routing:
-    """Pick a tier from signals. Score is 0 (easy) .. 1 (hard)."""
-    reasons: list[str] = []
-    if text_layer_chars >= 200:
-        return Routing(tier=1, score=0.0, model="text_layer",
-                       reasons=[f"born-digital text layer ({text_layer_chars} chars)"])
-
+def _scan_difficulty(signals: dict) -> tuple[float, list[str]]:
     score = 0.35  # any scan starts above zero
-    reasons.append("no usable text layer (scan)")
+    reasons = ["no usable text layer (scan)"]
     if signals["blur"] < 60:
         score += 0.2
         reasons.append(f"low sharpness ({signals['blur']})")
@@ -55,19 +49,30 @@ def route(signals: dict, text_layer_chars: int) -> Routing:
     if signals["ink_density"] > 0.25:
         score += 0.1
         reasons.append(f"very dense dark areas ({signals['ink_density']})")
-    score = min(score, 1.0)
+    return min(score, 1.0), reasons
+
+
+def route(signals: dict, text_layer_chars: int) -> Routing:
+    """Pick a tier from signals. Score is 0 (easy) .. 1 (hard)."""
+    if text_layer_chars >= 200:
+        return Routing(tier=1, score=0.0, model="text_layer",
+                       reasons=[f"born-digital text layer ({text_layer_chars} chars)"])
+
+    score, reasons = _scan_difficulty(signals)
+    if settings.public_mode or settings.uses_local_ocr:
+        reasons.append("local Tesseract OCR")
+        return Routing(tier=1, score=round(score, 2), model="tesseract", reasons=reasons)
 
     if settings.historical_bias:
         tier = 3
         reasons.append("historical-corpus bias: scans go to the strongest tier")
     else:
         tier = 1 if score < 0.35 else 2 if score < 0.6 else 3
-        # Tier 1 has no local OCR engine yet, so use the cheapest vision model.
     return Routing(tier=tier, score=round(score, 2), model=settings.model_for_tier(tier), reasons=reasons)
 
 
 def next_tier(r: Routing) -> Routing | None:
-    if r.tier >= 3:
+    if r.model == "tesseract" or r.tier >= 3:
         return None
     t = r.tier + 1
     return Routing(tier=t, score=r.score, model=settings.model_for_tier(t),

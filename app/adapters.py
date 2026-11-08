@@ -1,9 +1,10 @@
-"""OCR model adapters. Claude is the real one; Mock supports tests and keyless dev."""
+"""OCR model adapters. Claude is the personal one; Tesseract is the public one; Mock is for tests."""
 from __future__ import annotations
 
 import base64
 import json
 import re
+import subprocess
 from dataclasses import dataclass, field
 from typing import Optional, Protocol
 
@@ -101,6 +102,86 @@ class ClaudeAdapter:
         return result_from_json(data, msg.usage.input_tokens, msg.usage.output_tokens)
 
 
+class EngineMissing(RuntimeError):
+    """The local OCR binary is not installed. Every page would fail the same way."""
+
+
+def blocks_from_tsv(tsv: str) -> tuple[list[Block], float]:
+    """Group a Tesseract TSV into paragraph blocks. Confidence is the mean word score, 0..1."""
+    lines = [ln for ln in tsv.splitlines() if ln.strip()]
+    if len(lines) < 2:
+        return [], 0.0
+    paragraphs: dict[tuple[str, str], dict[str, list[str]]] = {}
+    order: list[tuple[str, str]] = []
+    confs: list[float] = []
+    for line in lines[1:]:
+        parts = line.split("\t")
+        if len(parts) < 12 or parts[0] != "5":
+            continue
+        try:
+            conf = float(parts[10])
+        except ValueError:
+            continue
+        text = parts[11].strip()
+        if conf < 0 or not text:
+            continue
+        key = (parts[2], parts[3])
+        if key not in paragraphs:
+            paragraphs[key] = {}
+            order.append(key)
+        paragraphs[key].setdefault(parts[4], []).append(text)
+        confs.append(conf)
+    blocks = []
+    for key in order:
+        text = "\n".join(" ".join(words) for words in paragraphs[key].values()).strip()
+        if text:
+            blocks.append(Block(type="paragraph", text=text[:20000], confidence=1.0))
+    if not blocks:
+        return [], 0.0
+    return blocks, round(sum(confs) / len(confs) / 100.0, 3)
+
+
+class TesseractAdapter:
+    """On-server OCR that does not call a paid model API."""
+
+    def __init__(self):
+        self._lang: str | None = None
+
+    def _languages(self) -> str:
+        if self._lang:
+            return self._lang
+        try:
+            proc = subprocess.run(
+                ["tesseract", "--list-langs"], capture_output=True, text=True, timeout=15, check=False,
+            )
+        except FileNotFoundError as e:
+            raise EngineMissing("Local OCR is not installed on this server.") from e
+        found = set(proc.stdout.split()) | set(proc.stderr.split())
+        chosen = [code for code in ("eng", "por", "kan") if code in found] or ["eng"]
+        self._lang = "+".join(chosen)
+        return self._lang
+
+    def ocr(self, jpeg_bytes: bytes, model: str, hints: dict) -> OcrResult:
+        lang = self._languages()
+        proc = self._run(jpeg_bytes, lang)
+        if proc.returncode != 0 and lang != "eng":
+            proc = self._run(jpeg_bytes, "eng")
+        if proc.returncode != 0:
+            err = proc.stderr.decode(errors="replace")[:200]
+            raise RuntimeError(err or "tesseract failed")
+        blocks, conf = blocks_from_tsv(proc.stdout.decode(errors="replace"))
+        return OcrResult(blocks=blocks, language=None, confidence=conf, input_tokens=0, output_tokens=0)
+
+    def _run(self, jpeg_bytes: bytes, lang: str) -> subprocess.CompletedProcess:
+        try:
+            return subprocess.run(
+                ["tesseract", "stdin", "stdout", "-l", lang, "--psm", "6", "tsv"],
+                input=jpeg_bytes, capture_output=True, timeout=45, check=False,
+            )
+        except FileNotFoundError as e:
+            raise EngineMissing("Local OCR is not installed on this server.") from e
+
+
 class MockAdapter:
     """Deterministic fake. Confidence rises with tier so escalation is testable."""
 
@@ -117,6 +198,15 @@ class MockAdapter:
 
 
 def get_adapter() -> OcrAdapter:
-    if settings.use_mock or not settings.anthropic_api_key:
+    # A public server never constructs the paid client, even if a key is present in the environment.
+    if settings.public_mode:
+        if settings.use_mock or settings.ocr_engine.lower() == "mock":
+            return MockAdapter()
+        return TesseractAdapter()
+    if settings.use_mock or settings.ocr_engine.lower() == "mock":
+        return MockAdapter()
+    if settings.uses_local_ocr:
+        return TesseractAdapter()
+    if not settings.anthropic_api_key:
         return MockAdapter()
     return ClaudeAdapter()

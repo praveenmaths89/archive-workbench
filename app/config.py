@@ -21,13 +21,48 @@ class Settings(BaseSettings):
     escalation_threshold: float = 0.85
     render_dpi: int = 200
     api_image_max_edge: int = 2000
+    max_render_edge: int = 4500  # cap a hostile page's pixmap
     max_files_per_job: int = 50
     max_file_mb: int = 100
     max_pages_per_file: int = 500
     workers: int = 2
 
+    # Public server: local OCR only, per-browser sessions, no shared API spend.
+    public_mode: bool = False
+    session_secret: str = ""
+    cookie_secure: bool = False
+    ocr_engine: str = "auto"  # auto | tesseract | claude | mock
+    public_max_files: int = 3
+    public_max_file_mb: int = 8
+    public_max_pages: int = 5
+    public_max_jobs: int = 8
+    public_max_jobs_per_hour: int = 6
+    public_max_pages_per_day: int = 20
+    public_retention_hours: int = 24
+
     def model_for_tier(self, tier: int) -> str:
         return {1: self.model_tier1, 2: self.model_tier2, 3: self.model_tier3}[tier]
+
+    @property
+    def uses_local_ocr(self) -> bool:
+        engine = self.ocr_engine.lower()
+        if engine == "tesseract":
+            return True
+        if engine in ("claude", "mock"):
+            return False
+        return self.public_mode and not self.use_mock
+
+    @property
+    def file_limit_mb(self) -> int:
+        return self.public_max_file_mb if self.public_mode else self.max_file_mb
+
+    @property
+    def files_limit(self) -> int:
+        return self.public_max_files if self.public_mode else self.max_files_per_job
+
+    @property
+    def pages_limit(self) -> int:
+        return self.public_max_pages if self.public_mode else self.max_pages_per_file
 
 
 settings = Settings()

@@ -1,0 +1,4 @@
+eng.traineddata.gz, por.traineddata.gz, and kan.traineddata.gz are the 4.0.0
+traineddata files from https://github.com/naptha/tessdata (Apache-2.0).
+Tesseract.js and its core, and PDF.js, are also Apache-2.0. Their license
+files are in the sibling vendor directories.
